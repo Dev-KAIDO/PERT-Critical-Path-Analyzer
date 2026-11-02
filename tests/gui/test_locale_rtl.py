@@ -23,7 +23,9 @@ def test_main_window_switches_language_and_direction(qapp) -> None:
         assert window.language is UiLanguage.ENGLISH
         window.set_language("ar")
         assert window.language is UiLanguage.ARABIC
-        assert window.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        # A-8 policy: the shell (sidebar) never flips - Arabic only
+        # rewrites texts, so the window always stays left-to-right.
+        assert window.layoutDirection() == Qt.LayoutDirection.LeftToRight
         assert window._locale_btn.text() == "English"
         assert window._nav_buttons[0].text().endswith("تحليل")
         window.set_language("en")

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QComboBox, QLabel, QPushButton, QWidget
 
 
 class UiLanguage(StrEnum):
@@ -42,12 +42,15 @@ def locale_for(value: str | UiLanguage | None) -> UiLocale:
 
 
 def apply_ui_locale(widget: QWidget, value: str | UiLanguage | None) -> UiLocale:
-    """Apply direction to the application and widget without touching analysis data."""
+    """Apply the locale WITHOUT flipping layout direction (A-8 policy).
+
+    Arabic only rewrites texts; the window keeps its stable left
+    sidebar regardless of language (user decision - the whole-shell
+    flip felt confusing).  ``locale.direction`` stays available as the
+    locale's natural-direction marker, the properties record the
+    active locale, and the style re-polish still runs.
+    """
     locale = locale_for(value)
-    app = QApplication.instance()
-    if app is not None:
-        app.setLayoutDirection(locale.direction)
-    widget.setLayoutDirection(locale.direction)
     widget.setProperty("uiLanguage", locale.language.value)
     widget.setProperty("uiDirection", "rtl" if locale.is_rtl else "ltr")
     widget.style().unpolish(widget)
