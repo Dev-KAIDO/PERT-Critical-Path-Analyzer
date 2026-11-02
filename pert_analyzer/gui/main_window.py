@@ -537,6 +537,15 @@ class MainWindow(QMainWindow):
     # Navigation
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Top bar sync (A-9): automatic session transitions update the
+    # workflow pills + header status too, not only manual navigation.
+    # ------------------------------------------------------------------
+
+    def _sync_topbar(self) -> None:
+        self._update_workflow_indicator()
+        self._update_header_status()
+
     def _on_nav(self, dest: NavDestination) -> None:
         self._stack.setCurrentIndex(dest.value)
         for idx, btn in self._nav_buttons.items():
@@ -622,6 +631,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             return
         self._session.set_image(path)
+        self._sync_topbar()
         self._analysis_page.set_state(self._session.state.value)
         self._refresh_pages()
         self.statusBar().showMessage(f"Image: {Path(path).name}")
@@ -630,6 +640,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             return
         self._session.clear_image()
+        self._sync_topbar()
         self._analysis_page.set_state(self._session.state.value)
         self._refresh_pages()
         self.statusBar().showMessage("Ready")
@@ -644,6 +655,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             return
         self._session.begin_analysis()
+        self._sync_topbar()
         self._analysis_page.set_state("ANALYZING")
         self._analysis_page.begin_analysis()
         self.statusBar().showMessage("Analyzing...")
@@ -669,6 +681,7 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_completed(self, workflow: Any) -> None:
         self._session.complete_analysis(workflow)
+        self._sync_topbar()
         state = self._session.state
         self._analysis_page.show_completed(
             workflow, review_item_total=self._session.review_item_total()
@@ -692,6 +705,7 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_failed(self, msg: str) -> None:
         self._session.fail_analysis(msg)
+        self._sync_topbar()
         self._analysis_page.show_failed(msg)
         self._analysis_page.set_state("ERROR")
         self._analysis_page.set_error(msg)
@@ -816,6 +830,7 @@ class MainWindow(QMainWindow):
             return
         self._review_page.set_busy(True)
         self._session.begin_apply()
+        self._sync_topbar()
         self._apply_worker = ApplyReviewsWorker(
             workflow,
             apply_fn=self._apply_reviews_fn,
@@ -837,6 +852,7 @@ class MainWindow(QMainWindow):
     def _on_apply_failed(self, msg: str) -> None:
         self._review_page.set_busy(False)
         self._session.fail_apply(msg)
+        self._sync_topbar()
         self._refresh_pages()
         self.statusBar().showMessage(f"Apply failed: {msg}")
 
@@ -880,6 +896,7 @@ class MainWindow(QMainWindow):
             candidate.cpm = result
             paths = list(getattr(result, "critical_paths", None) or [])
             candidate.pure_critical_paths = [list(p) for p in paths]
+        self._sync_topbar()
         self._refresh_pages()
         self._results_page.refresh(self._session)
         self.statusBar().showMessage("Results calculated")
@@ -887,6 +904,7 @@ class MainWindow(QMainWindow):
 
     def _on_cpm_failed(self, msg: str) -> None:
         self._results_page.set_busy(False)
+        self._sync_topbar()
         self._refresh_pages()
         self.statusBar().showMessage(f"Calculation failed: {msg}")
         logger.warning("CPM calculation failed: %s", msg)
@@ -915,10 +933,12 @@ class MainWindow(QMainWindow):
             result = engine.analyze(graph, estimates)
         except Exception as exc:
             self._session.pert_result = None
+            self._sync_topbar()
             self._results_page.refresh(self._session)
             self.statusBar().showMessage(f"PERT error: {exc}")
             return
         self._session.pert_result = result
+        self._sync_topbar()
         self._results_page.refresh(self._session)
         self.statusBar().showMessage("PERT analysis completed")
 
@@ -944,6 +964,7 @@ class MainWindow(QMainWindow):
             candidate = workflow.apply()
         except Exception as exc:  # noqa: BLE001
             self._session.fail_apply(str(exc))
+            self._sync_topbar()
             self._validation_page.set_busy(False)
             self._refresh_pages()
             self._validation_page.set_feedback(f"Revalidation failed: {exc}", error=True)
@@ -953,6 +974,7 @@ class MainWindow(QMainWindow):
         self._validation_page.set_busy(False)
         if candidate is None:
             self._session.fail_apply("Revalidation returned no candidate")
+            self._sync_topbar()
             self._refresh_pages()
             self._validation_page.set_feedback(
                 "Revalidation returned no candidate", error=True
@@ -961,6 +983,7 @@ class MainWindow(QMainWindow):
             return
 
         self._session.complete_apply(candidate)
+        self._sync_topbar()
         self._refresh_pages()
         status = self._session.validation_status
         if status == ValidationCenterStatus.VALID:
