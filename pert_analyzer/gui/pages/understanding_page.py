@@ -311,7 +311,8 @@ class ReconstructionCanvas(QWidget):
         span_y = max(ys) - min(ys)
         if span_x <= _NODE_W and span_y <= _NODE_H:
             return False
-        pad = 56.0  # node footprint + a whisper of air in the frame
+        pad = 56.0  # node footprint + breathing room in the frame: the
+        # healthy headroom relaxation needs to unstack tight columns
         avail_x = max(self.width() - 2.0 * pad, _NODE_W)
         avail_y = max(self.height() - 2.0 * pad, _NODE_W)
         candidates: list[float] = []
@@ -409,20 +410,31 @@ class ReconstructionCanvas(QWidget):
 
     def _relax(self) -> None:
         """Deterministic nudges so chips never overlap; positions stay
-        pinned inside the frame (plain pixel space, A-10b)."""
+        pinned inside the frame (plain pixel space, A-10b).  Each sweep
+        splits EVERY violating pair once, so cascades - a split shoving
+        a neighbour onto someone else - settle across sweeps instead of
+        exhausting a restart budget.  Splits part horizontally when the
+        frame has room, which keeps the drawing's vertical reading
+        intact and ends the stacked-column bounce."""
         if not self._positions:
             return
         pad_x = _NODE_R + 11.0   # clearance for the node circle
         pad_y = _NODE_R + 20.0   # clearance for the duration label below
+        min_x = float(_NODE_W)
+        min_y = float(_NODE_H)
+        n = len(self._positions)
         for _ in range(400):
-            pair = self._first_violating_pair()
-            if pair is None:
-                return
-            i, j = pair
-            dx = self._positions[i][0] - self._positions[j][0]
-            dy = self._positions[i][1] - self._positions[j][1]
-            self._split_pair(i, j, dx, dy)
+            violated = False
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dx = self._positions[i][0] - self._positions[j][0]
+                    dy = self._positions[i][1] - self._positions[j][1]
+                    if abs(dx) < min_x and abs(dy) < min_y:
+                        violated = True
+                        self._split_pair(i, j, dx, dy)
             self._clamp_frame(pad_x, pad_y)
+            if not violated:
+                return
         # Worst case: leave the layout as-is; painting remains valid.
 
     def _clamp_frame(self, pad_x: float, pad_y: float) -> None:
@@ -436,43 +448,46 @@ class ReconstructionCanvas(QWidget):
             for (x, y) in self._positions
         ]
 
-    def _first_violating_pair(self) -> Optional[tuple[int, int]] | None:
-        n = len(self._positions)
-        for i in range(n):
-            xi, yi = self._positions[i]
-            for j in range(i + 1, n):
-                if (
-                    abs(xi - self._positions[j][0]) < _NODE_W
-                    and abs(yi - self._positions[j][1]) < _NODE_H
-                ):
-                    return i, j
-        return None
-
     def _split_pair(self, i: int, j: int, dx: float, dy: float) -> None:
-        """Push one too-close pair straight apart in pixel space,
-        choosing the axis that clears in the fewest pushes."""
-        steps_x = abs(_NODE_W - abs(dx)) / 8.0
-        steps_y = abs(_NODE_H - abs(dy)) / 7.0
-        if steps_x <= steps_y:
-            sign = 1.0 if dx >= 0 else -1.0
-            self._positions[i] = (
-                self._positions[i][0] + 8.0 * sign,
-                self._positions[i][1],
-            )
-            self._positions[j] = (
-                self._positions[j][0] - 8.0 * sign,
-                self._positions[j][1],
-            )
+        """Push one too-close pair apart in a single midpoint move, on
+        the axis that actually has room inside the frame.  Horizontal
+        parting is preferred: it preserves the mirror's vertical
+        reading of the drawing and never fights the top/bottom clamps
+        where stacked columns previously bounced for ever."""
+        pad_x = _NODE_R + 11.0
+        pad_y = _NODE_R + 20.0
+        xi, yi = self._positions[i]
+        xj, yj = self._positions[j]
+        need_x = (_NODE_W - abs(dx)) / 2.0 + 0.5
+        need_y = (_NODE_H - abs(dy)) / 2.0 + 0.5
+        width, height = self.width(), self.height()
+        if dx >= 0:
+            room_x = (width - pad_x - xi) + (xj - pad_x)
         else:
+            room_x = (xi - pad_x) + (width - pad_x - xj)
+        if dy >= 0:
+            room_y = (height - pad_y - yi) + (yj - pad_y)
+        else:
+            room_y = (yi - pad_y) + (height - pad_y - yj)
+        if room_x >= 2.0 * need_x:
+            sign = 1.0 if dx >= 0 else -1.0
+            self._positions[i] = (xi + need_x * sign, yi)
+            self._positions[j] = (xj - need_x * sign, yj)
+        elif room_y >= 2.0 * need_y:
             sign = 1.0 if dy >= 0 else -1.0
-            self._positions[i] = (
-                self._positions[i][0],
-                self._positions[i][1] + 7.0 * sign,
-            )
-            self._positions[j] = (
-                self._positions[j][0],
-                self._positions[j][1] - 7.0 * sign,
-            )
+            self._positions[i] = (xi, yi + need_y * sign)
+            self._positions[j] = (xj, yj - need_y * sign)
+        else:
+            # both axes are pinned against the frame: fall back to the
+            # axis that clears in the fewest nudges
+            if need_x / 8.0 <= need_y / 7.0:
+                sign = 1.0 if dx >= 0 else -1.0
+                self._positions[i] = (xi + need_x * sign, yi)
+                self._positions[j] = (xj - need_x * sign, yj)
+            else:
+                sign = 1.0 if dy >= 0 else -1.0
+                self._positions[i] = (xi, yi + need_y * sign)
+                self._positions[j] = (xj, yj - need_y * sign)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -636,9 +651,9 @@ class ReconstructionCanvas(QWidget):
             )
             painter.drawText(
                 QRectF(
-                    x - _NODE_W / 2.0,
+                    x - _NODE_R,
                     y + _NODE_R + 1.0,
-                    _NODE_W,
+                    _NODE_R * 2.0,
                     14.0,
                 ),
                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
