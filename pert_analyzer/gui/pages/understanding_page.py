@@ -1,9 +1,11 @@
 """
 Understanding page: preliminary reconstruction of the analyzed diagram.
 
-The page shows the original image alongside an auto-laid-out preview of the
-detected nodes and edges (driven by the review session) before the user moves
-into the detailed Human Review Center. It only renders state; all logic lives
+The page shows the original image alongside a spatial preview of the detected
+nodes and edges (driven by the review session) before the user moves into the
+detailed Human Review Center.  When the reconstruction carries the detected
+image coordinates, the map mirrors the drawing (A-10b); otherwise it falls
+back to a layered left-to-right network map. It only renders state; all logic lives
 in the backend pipeline and the review session.
 """
 
@@ -12,8 +14,17 @@ from __future__ import annotations
 import math
 from typing import Any, Optional
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPolygonF,
+    QRadialGradient,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -49,7 +60,12 @@ from pert_analyzer.gui.themes.typography import (
     TITLE_FONT,
 )
 
-_NODE_RADIUS = 20
+# A-10c drawn nodes: the mirror reproduces the drawing's own node
+# symbols - a small circle with the detected id inside and the duration
+# written beneath it (brief, direct, painted like a real network).
+_NODE_R = 16      # node circle radius
+_NODE_W = 46      # collision footprint (circle + side air)
+_NODE_H = 48      # collision footprint (circle + duration label below)
 
 
 def _is_resolved(item: Any) -> bool:
@@ -59,11 +75,26 @@ def _is_resolved(item: Any) -> bool:
     return str(value).lower() != "pending"
 
 
-class ReconstructionCanvas(QWidget):
-    """Radial layout preview of the detected reconstruction.
+def _alpha(hex_color: str, alpha: int) -> QColor:
+    """Painter-side translucent colour (QSS must use qrgba instead)."""
+    color = QColor(hex_color)
+    color.setAlpha(max(0, min(255, int(alpha))))
+    return color
 
-    Confirmed items are drawn solid/in accent, unresolved items stay amber
-    with a dashed outline so the user can see exactly what still needs review.
+
+class ReconstructionCanvas(QWidget):
+    """Machine map of the detected reconstruction (A-10).
+
+    Nodes are drawn as the reconstruction of the uploaded drawing: a
+    small circle per node carrying its detected id, with the duration
+    written beneath it and soft bezier edges with tiny direction
+    arrowheads (confirmed = accent, pending = dashed amber).  A-10c
+    paints the durations directly on this page (the A-6 tooltips-only
+    rule still governs every other canvas).
+
+    A-10b: the layout mirrors the uploaded drawing - nodes sit at their
+    real detected image coordinates when available - and falls back to
+    a layered left-to-right network map when geometry is missing.
     """
 
     def __init__(self, parent: QWidget | None = None):
@@ -73,6 +104,13 @@ class ReconstructionCanvas(QWidget):
         self._durations: dict[int, str] = {}
         self._positions: list[tuple[float, float]] = []
         self._id_to_index: dict[str, int] = {}
+        self._mode = "empty"  # "mirror" | "layers" | "empty"
+        self._t = 0.0
+        self._halo = True
+        self._beat = QTimer(self)
+        self._beat.setInterval(34)
+        self._beat.timeout.connect(self._tick)
+        self.setMouseTracking(True)  # hover provides the d= tooltips
         self.setMinimumHeight(230)
 
     # ------------------------------------------------------------------
@@ -84,8 +122,14 @@ class ReconstructionCanvas(QWidget):
         activities: list[Any],
         dependencies: list[Any],
         durations: list[Any],
+        geometry: dict[str, tuple[float, float]] | None = None,
     ) -> int:
-        """Rebuild the preview from review items. Returns node count."""
+        """Rebuild the preview from review items. Returns node count.
+
+        ``geometry`` carries real image coordinates (A-10b mirror of the
+        drawing); when a point exists for every chip the map reproduces
+        the detected positions, otherwise it falls back to layers.
+        """
         self._nodes = []
         self._edges = []
         self._durations = {}
@@ -93,14 +137,21 @@ class ReconstructionCanvas(QWidget):
 
         for act in activities or []:
             geometric = getattr(act, "geometric_node_id", None)
-            activity_id = getattr(act, "activity_id", None)
-            node_id = geometric or activity_id or "?"
+            activity_id = (
+                getattr(act, "activity_id", None)
+                or getattr(act, "current_activity_id", None)
+                or getattr(act, "proposed_activity_id", None)
+            )
+            node_id = activity_id or geometric or "?"
             index = len(self._nodes)
             self._nodes.append(
                 {
                     "id": str(node_id),
                     "label": str(node_id),
                     "resolved": _is_resolved(act),
+                    "point": (geometry or {}).get(
+                        str(geometric) if geometric is not None else str(node_id)
+                    ),
                 }
             )
             for key in (geometric, activity_id):
@@ -123,7 +174,11 @@ class ReconstructionCanvas(QWidget):
 
         for dur in durations or []:
             geometric = getattr(dur, "geometric_node_id", None)
-            activity_id = getattr(dur, "activity_id", None)
+            activity_id = (
+                getattr(dur, "activity_id", None)
+                or getattr(dur, "current_activity_id", None)
+                or getattr(dur, "proposed_activity_id", None)
+            )
             index = None
             for key in (geometric, activity_id):
                 if key is not None:
@@ -138,7 +193,10 @@ class ReconstructionCanvas(QWidget):
             else:
                 self._durations[index] = "d=?"
 
+        self._t = 0.0
         self._layout()
+        self.setToolTip("")
+        self._sync_beat()
         self.update()
         return len(self._nodes)
 
@@ -148,6 +206,10 @@ class ReconstructionCanvas(QWidget):
         self._durations = {}
         self._positions = []
         self._id_to_index = {}
+        self._mode = "empty"
+        self.setToolTip("")
+        self._layout()
+        self._sync_beat()
         self.update()
 
     @property
@@ -159,23 +221,257 @@ class ReconstructionCanvas(QWidget):
         return sum(1 for node in self._nodes if not node["resolved"])
 
     # ------------------------------------------------------------------
+    # Breathing halo (A-10 chamber language)
+    # ------------------------------------------------------------------
+
+    def _tick(self) -> None:
+        self._t = (self._t + 0.034) % 3.4
+        self.update()
+
+    def _sync_beat(self) -> None:
+        """The halo breathes only while the map has something to show."""
+        if self.isVisible() and bool(self._nodes):
+            self._beat.start()
+        else:
+            self._beat.stop()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_beat()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self._sync_beat()
+
+    # ------------------------------------------------------------------
+    # Hover: the only place where d= durations surface
+    # ------------------------------------------------------------------
+
+    def _hit_index(self, pos: QPointF) -> Optional[int]:
+        px, py = pos.x(), pos.y()
+        for index, (x, y) in enumerate(self._positions):
+            if math.hypot(px - x, py - y) <= _NODE_R + 2.0:
+                return index
+        return None
+
+    def _tooltip_text(self, index: int) -> str:
+        node = self._nodes[index]
+        lines = [node["id"]]
+        duration = self._durations.get(index)
+        if duration is not None:
+            lines.append(duration)
+        elif not node["resolved"]:
+            lines.append("d=?")
+        return "\n".join(lines)
+
+    def hoverMoveEvent(self, event) -> None:  # noqa: N802
+        index = self._hit_index(event.position())
+        tooltip = self._tooltip_text(index) if index is not None else ""
+        if self.toolTip() != tooltip:
+            self.setToolTip(tooltip)
+        super().hoverMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.setToolTip("")
+        super().leaveEvent(event)
+
+    # ------------------------------------------------------------------
     # Layout + painting
     # ------------------------------------------------------------------
 
     def _layout(self) -> None:
+        """A-10b: place chips as a mirror of the drawing when real
+        detected coordinates exist, else a layered network map."""
         self._positions = []
         count = len(self._nodes)
         if count == 0:
+            self._mode = "empty"
             return
+        if self._layout_mirror():
+            self._mode = "mirror"
+        else:
+            self._mode = "layers"
+            self._layout_layers()
+        self._relax()
+
+    def _layout_mirror(self) -> bool:
+        """Scale real drawing coordinates into the canvas with a true
+        aspect ratio (y grows down exactly like the uploaded image),
+        keeping the map in frame.  False when the coordinates carry no
+        spatial value (everything inside one chip footprint)."""
+        points: list[tuple[float, float]] = []
+        for node in self._nodes:
+            point = node.get("point")
+            if point is None:
+                return False
+            points.append((float(point[0]), float(point[1])))
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        span_x = max(xs) - min(xs)
+        span_y = max(ys) - min(ys)
+        if span_x <= _NODE_W and span_y <= _NODE_H:
+            return False
+        pad = 56.0  # node footprint + a whisper of air in the frame
+        avail_x = max(self.width() - 2.0 * pad, _NODE_W)
+        avail_y = max(self.height() - 2.0 * pad, _NODE_W)
+        candidates: list[float] = []
+        if span_x > 1e-6:
+            candidates.append(avail_x / span_x)
+        if span_y > 1e-6:
+            candidates.append(avail_y / span_y)
+        scale = min(candidates) if candidates else 1.0
         cx, cy = self.width() / 2.0, self.height() / 2.0
-        radius = min(cx, cy) - _NODE_RADIUS - 18
-        if radius < 40:
-            radius = 40
-        for i in range(count):
-            angle = -90.0 + 360.0 * i / count
-            rad = math.radians(angle)
-            self._positions.append(
-                (cx + radius * math.cos(rad), cy + radius * math.sin(rad))
+        center_x = (max(xs) + min(xs)) / 2.0
+        center_y = (max(ys) + min(ys)) / 2.0
+        self._positions = [
+            (cx + (x - center_x) * scale, cy + (y - center_y) * scale)
+            for x, y in points
+        ]
+        return True
+
+    def _layout_layers(self) -> None:
+        """Fallback map: columns follow network depth (Kahn levels),
+        long levels wrap into half-step sub-columns."""
+        levels = self._depth_levels()
+        columns: list[list[int]] = [[] for _ in range(max(1, len(levels)))]
+        for index, level in enumerate(levels):
+            columns[max(0, min(level, len(columns) - 1))].append(index)
+        pad = 56.0
+        row_step = _NODE_H * 1.66
+        cap_rows = max(3, int((self.height() - 2.0 * pad) // row_step) or 3)
+        width_units = 0.0
+        shape: dict[int, tuple[int, int]] = {}  # level -> (subcols, rows)
+        for column, indexes in enumerate(columns):
+            if not indexes:
+                continue
+            subcols = max(1, int(math.ceil(len(indexes) / cap_rows)))
+            shape[column] = (subcols, min(len(indexes), cap_rows))
+            width_units = max(width_units, column + 0.42 * (subcols - 1))
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        unit_x = max(
+            (self.width() - 2.0 * pad - _NODE_W) / max(width_units, 1.0),
+            _NODE_W,
+        )
+        points: dict[int, tuple[float, float]] = {}
+        for column, indexes in enumerate(columns):
+            shape_here = shape.get(column)
+            if shape_here is None:
+                continue
+            subcols, _rows = shape_here
+            for k, index in enumerate(indexes):
+                sub = min(k // cap_rows, subcols - 1)
+                row = k % cap_rows
+                rows_here = min(len(indexes) - sub * cap_rows, cap_rows)
+                x = cx + ((column + 0.42 * sub) - width_units / 2.0) * unit_x
+                if rows_here > 1:
+                    step = min(
+                        row_step, (self.height() - 2.0 * pad) / (rows_here - 1)
+                    )
+                    y = cy + (row - (rows_here - 1) / 2.0) * step
+                else:
+                    y = cy
+                points[index] = (x, y)
+        self._positions = [
+            points.get(i, (cx, cy)) for i in range(len(self._nodes))
+        ]
+
+    def _depth_levels(self) -> list[int]:
+        """Column depth per node: Kahn levels; closed loops settle for
+        the predecessor-based approximation."""
+        count = len(self._nodes)
+        preds: list[set[int]] = [set() for _ in range(count)]
+        succs: list[set[int]] = [set() for _ in range(count)]
+        for si, ti, _resolved in self._edges:
+            if si < count and ti < count and si != ti:
+                succs[si].add(ti)
+                preds[ti].add(si)
+        indegree = [len(preds[i]) for i in range(count)]
+        level = [-1] * count
+        frontier = [i for i in range(count) if indegree[i] == 0]
+        depth = 0
+        while frontier:
+            nxt: list[int] = []
+            for node in frontier:
+                level[node] = depth
+            for node in frontier:
+                for child in sorted(succs[node]):
+                    indegree[child] -= 1
+                    if indegree[child] == 0:
+                        nxt.append(child)
+            frontier = nxt
+            depth += 1
+        for node in range(count):
+            if level[node] >= 0:
+                continue
+            options = [level[p] + 1 for p in sorted(preds[node]) if level[p] >= 0]
+            level[node] = max(options, default=0)
+        return [max(lv, 0) for lv in level]
+
+    def _relax(self) -> None:
+        """Deterministic nudges so chips never overlap; positions stay
+        pinned inside the frame (plain pixel space, A-10b)."""
+        if not self._positions:
+            return
+        pad_x = _NODE_R + 11.0   # clearance for the node circle
+        pad_y = _NODE_R + 20.0   # clearance for the duration label below
+        for _ in range(400):
+            pair = self._first_violating_pair()
+            if pair is None:
+                return
+            i, j = pair
+            dx = self._positions[i][0] - self._positions[j][0]
+            dy = self._positions[i][1] - self._positions[j][1]
+            self._split_pair(i, j, dx, dy)
+            self._clamp_frame(pad_x, pad_y)
+        # Worst case: leave the layout as-is; painting remains valid.
+
+    def _clamp_frame(self, pad_x: float, pad_y: float) -> None:
+        """Keep every chip fully inside the drawn frame."""
+        width, height = self.width(), self.height()
+        self._positions = [
+            (
+                min(max(x, pad_x), max(width - pad_x, pad_x)),
+                min(max(y, pad_y), max(height - pad_y, pad_y)),
+            )
+            for (x, y) in self._positions
+        ]
+
+    def _first_violating_pair(self) -> Optional[tuple[int, int]] | None:
+        n = len(self._positions)
+        for i in range(n):
+            xi, yi = self._positions[i]
+            for j in range(i + 1, n):
+                if (
+                    abs(xi - self._positions[j][0]) < _NODE_W
+                    and abs(yi - self._positions[j][1]) < _NODE_H
+                ):
+                    return i, j
+        return None
+
+    def _split_pair(self, i: int, j: int, dx: float, dy: float) -> None:
+        """Push one too-close pair straight apart in pixel space,
+        choosing the axis that clears in the fewest pushes."""
+        steps_x = abs(_NODE_W - abs(dx)) / 8.0
+        steps_y = abs(_NODE_H - abs(dy)) / 7.0
+        if steps_x <= steps_y:
+            sign = 1.0 if dx >= 0 else -1.0
+            self._positions[i] = (
+                self._positions[i][0] + 8.0 * sign,
+                self._positions[i][1],
+            )
+            self._positions[j] = (
+                self._positions[j][0] - 8.0 * sign,
+                self._positions[j][1],
+            )
+        else:
+            sign = 1.0 if dy >= 0 else -1.0
+            self._positions[i] = (
+                self._positions[i][0],
+                self._positions[i][1] + 7.0 * sign,
+            )
+            self._positions[j] = (
+                self._positions[j][0],
+                self._positions[j][1] - 7.0 * sign,
             )
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -188,10 +484,10 @@ class ReconstructionCanvas(QWidget):
         painter.fillRect(self.rect(), QColor(SURFACE))
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        edge = self.rect().adjusted(1, 1, -1, -1)
+        frame = self.rect().adjusted(1, 1, -1, -1)
         painter.setPen(QPen(QColor(BORDER), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(edge, RADIUS_LG, RADIUS_LG)
+        painter.drawRoundedRect(frame, RADIUS_LG, RADIUS_LG)
 
         if not self._nodes:
             painter.setFont(QFont(*BODY_FONT))
@@ -204,51 +500,150 @@ class ReconstructionCanvas(QWidget):
             painter.end()
             return
 
-        # edges first (under the nodes)
-        for si, ti, resolved in self._edges:
+        painter.setClipRect(frame)
+
+        # A-10 chamber: a quiet pool of light the machine map floats in.
+        self._paint_halo(painter)
+
+        # soft bezier arcs first, so chips cover their endpoints
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for index, (si, ti, resolved) in enumerate(self._edges):
             if si >= len(self._positions) or ti >= len(self._positions):
                 continue
-            pen = QPen(QColor(ACCENT if resolved else WARNING), 1.5)
+            color = ACCENT if resolved else WARNING
+            pen = QPen(_alpha(color, 200 if resolved else 215), 1.5)
             if not resolved:
                 pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(pen)
-            painter.drawLine(
-                self._positions[si][0],
-                self._positions[si][1],
-                self._positions[ti][0],
-                self._positions[ti][1],
-            )
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(self._edge_path(si, ti, index))
+            # A-10b: tiny direction arrowhead at the target end
+            painter.setBrush(_alpha(color, 225))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawPolygon(self._arrow_head(si, ti))
 
-        painter.setFont(QFont(*BODY_FONT))
+        painter.setFont(QFont(*BODY_SMALL_FONT))
         for index, node in enumerate(self._nodes):
-            x, y = self._positions[index]
-            rect = QRectF(
-                x - _NODE_RADIUS, y - _NODE_RADIUS, 2 * _NODE_RADIUS, 2 * _NODE_RADIUS
-            )
-            fill = QColor(SURFACE_LIGHT if node["resolved"] else SURFACE_LIGHT)
-            color = QColor(ACCENT if node["resolved"] else WARNING)
-            pen = QPen(color, 2)
-            if not node["resolved"]:
-                pen.setStyle(Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            painter.setBrush(fill)
-            painter.drawEllipse(rect)
-
-            painter.setPen(QColor(TEXT))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, node["label"])
-
-            duration = self._durations.get(index)
-            if duration is not None:
-                painter.setFont(QFont(*MUTED_FONT))
-                painter.setPen(QColor(TEXT_MUTED if node["resolved"] else WARNING))
-                painter.drawText(
-                    QRectF(x - 40, y + _NODE_RADIUS + 4, 80, 18),
-                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-                    duration,
-                )
-                painter.setFont(QFont(*BODY_FONT))
+            self._paint_node(painter, index, node)
 
         painter.end()
+
+    def _paint_halo(self, painter: QPainter) -> None:
+        """Breathing pool of light behind the map (no orbit guides in
+        the mirror layout - the drawing itself is the reference)."""
+        if not self._halo:
+            return
+        breathe = 0.5 + 0.5 * math.sin(2.0 * math.pi * self._t / 3.4)
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        glow_radius = max(self.width(), self.height()) * 0.62
+        grad = QRadialGradient(QPointF(cx, cy), glow_radius)
+        grad.setColorAt(0.0, _alpha(ACCENT, int(20 + 16 * breathe)))
+        grad.setColorAt(1.0, _alpha(ACCENT, 0))
+        painter.fillRect(self.rect(), grad)
+
+    def _arrow_head(self, si: int, ti: int) -> QPolygonF:
+        """Tiny direction triangle just outside the target chip, aimed
+        along the straight source-to-target line (A-10b)."""
+        sx, sy = self._positions[si]
+        tx, ty = self._positions[ti]
+        dx, dy = tx - sx, ty - sy
+        dist = math.hypot(dx, dy) or 1.0
+        ux, uy = dx / dist, dy / dist
+        # retreat until the triangle clears the target's footprint;
+        # the duration label hangs below, so flowing up needs more air
+        wall_x = (_NODE_R + 4.0) / abs(ux) if abs(ux) > 1e-9 else math.inf
+        wall_y = (
+            (_NODE_R + 18.0) if uy < 0.0 else (_NODE_R + 4.0)
+        ) / abs(uy) if abs(uy) > 1e-9 else math.inf
+        retreat = min(wall_x, wall_y)
+        base_x = tx - ux * retreat
+        base_y = ty - uy * retreat
+        px, py = -uy, ux  # perpendicular of the line
+        return QPolygonF(
+            [
+                QPointF(base_x, base_y),
+                QPointF(
+                    base_x - ux * 6.0 + px * 4.0, base_y - uy * 6.0 + py * 4.0
+                ),
+                QPointF(
+                    base_x - ux * 6.0 - px * 4.0, base_y - uy * 6.0 - py * 4.0
+                ),
+            ]
+        )
+
+    def _edge_path(self, si: int, ti: int, index: int) -> QPainterPath:
+        """Alternating quad-bezier arc so parallel connections split."""
+        sx, sy = self._positions[si]
+        tx, ty = self._positions[ti]
+        dx, dy = tx - sx, ty - sy
+        dist = math.hypot(dx, dy) or 1.0
+        bow = dist * 0.16 * (1.0 if index % 2 == 0 else -1.0)
+        mx = (sx + tx) / 2.0 - dy / dist * bow
+        my = (sy + ty) / 2.0 + dx / dist * bow
+        path = QPainterPath(QPointF(sx, sy))
+        path.quadTo(QPointF(mx, my), QPointF(tx, ty))
+        return path
+
+    def _paint_node(
+        self, painter: QPainter, index: int, node: dict[str, Any]
+    ) -> None:
+        """Draw one node as the drawing's own symbol: a small circle
+        with the detected id inside and the duration beneath (A-10c)."""
+        x, y = self._positions[index]
+        center = QPointF(x, y)
+        resolved = bool(node["resolved"])
+        family = ACCENT if resolved else WARNING
+
+        # opaque base + a whisper of the family wash, ring on top
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(SURFACE_LIGHT))
+        painter.drawEllipse(center, _NODE_R, _NODE_R)
+        painter.setBrush(_alpha(family, 24))
+        painter.drawEllipse(center, _NODE_R, _NODE_R)
+        pen = QPen(QColor(family), 1.4)
+        if not resolved:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(center, _NODE_R - 0.7, _NODE_R - 0.7)
+
+        # detected id inside the symbol, elided like any drawing label
+        label = QFontMetrics(painter.font()).elidedText(
+            node["label"], Qt.TextElideMode.ElideMiddle, _NODE_R * 2.0 - 10.0
+        )
+        painter.setPen(QColor(TEXT))
+        painter.drawText(
+            QRectF(
+                x - _NODE_R + 5.0,
+                y - _NODE_R + 2.0,
+                _NODE_R * 2.0 - 10.0,
+                _NODE_R * 2.0 - 4.0,
+            ),
+            Qt.AlignmentFlag.AlignCenter,
+            label,
+        )
+
+        # duration beneath the symbol, painted like a real network label
+        duration = self._durations.get(index)
+        if duration is None and not resolved:
+            duration = "d=?"
+        if duration is not None:
+            painter.setFont(QFont(*MUTED_FONT))
+            painter.setPen(
+                QColor(TEXT_MUTED)
+                if duration == "d=?"
+                else _alpha(family, 235)
+            )
+            painter.drawText(
+                QRectF(
+                    x - _NODE_W / 2.0,
+                    y + _NODE_R + 1.0,
+                    _NODE_W,
+                    14.0,
+                ),
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                duration,
+            )
 
 
 def _status_color(status: Any) -> str:
@@ -397,17 +792,13 @@ class UnderstandingPage(QWidget):
         canvas_title.setStyleSheet(f"color: {TEXT}; border: none; background: transparent;")
         canvas_header.addWidget(canvas_title)
         canvas_header.addStretch()
-        self._legend_label = QLabel(
-            f'<font color="{ACCENT}">\u25CF</font> Confirmed'
-            f'<font color="{TEXT_MUTED}">   </font>'
-            f'<font color="{WARNING}">\u25CB</font> Pending review'
-        )
-        self._legend_label.setFont(QFont(*MUTED_FONT))
-        self._legend_label.setTextFormat(Qt.TextFormat.RichText)
-        self._legend_label.setStyleSheet(
-            "border: none; background: transparent;"
-        )
-        canvas_header.addWidget(self._legend_label)
+        # A-10: chip-family legend, same visual language as the map chips.
+        self._legend_chips: list[QLabel] = [
+            self._legend_chip("\u25CF", "Confirmed", ACCENT),
+            self._legend_chip("\u25CB", "Pending review", WARNING),
+        ]
+        for chip in self._legend_chips:
+            canvas_header.addWidget(chip)
         canvas_layout.addLayout(canvas_header)
 
         self._canvas = ReconstructionCanvas()
@@ -447,6 +838,16 @@ class UnderstandingPage(QWidget):
         line.setFixedHeight(1)
         return line
 
+    def _legend_chip(self, glyph: str, text: str, color: str) -> QLabel:
+        chip = QLabel(f"{glyph}  {text}")
+        chip.setFont(QFont(*BODY_SMALL_FONT))
+        chip.setStyleSheet(
+            f"color: {TEXT}; background-color: {qrgba(color, 20)};"
+            f" border: 1px solid {qrgba(color, 78)}; border-radius: 10px;"
+            f" padding: 2px 10px;"
+        )
+        return chip
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -462,13 +863,44 @@ class UnderstandingPage(QWidget):
     def canvas(self) -> ReconstructionCanvas:
         return self._canvas
 
+    @staticmethod
+    def _geometry_map(review_session: Any) -> dict[str, tuple[float, float]]:
+        """A-10b: real detected coordinates per geometric node id,
+        taken from ``position`` or the bounding-box centre."""
+        reconstruction = getattr(review_session, "reconstruction", None)
+        activities = getattr(reconstruction, "activities", None) or []
+        found: dict[str, tuple[float, float]] = {}
+        for act in activities:
+            identity = getattr(act, "geometric_node_id", None)
+            if identity is None:
+                continue
+            point = getattr(act, "position", None)
+            if point is None:
+                box = getattr(act, "bounding_box", None)
+                if box is not None:
+                    try:
+                        point = (
+                            float(box.x) + float(box.width) / 2.0,
+                            float(box.y) + float(box.height) / 2.0,
+                        )
+                    except (AttributeError, TypeError, ValueError):
+                        point = None
+            if point is not None:
+                found[str(identity)] = (float(point[0]), float(point[1]))
+        return found
+
     def set_reconstruction(self, session: Any) -> None:
         """Render content for a session with a workflow + review session."""
         review_session = session.review_session
         activities = getattr(review_session, "activities", None) or []
         dependencies = getattr(review_session, "dependencies", None) or []
         durations = getattr(review_session, "durations", None) or []
-        self._canvas.set_reconstruction(activities, dependencies, durations)
+        self._canvas.set_reconstruction(
+            activities,
+            dependencies,
+            durations,
+            self._geometry_map(review_session),
+        )
 
         image_path = getattr(session, "current_image_path", None)
         if image_path and image_path != self._loaded_image_path:
