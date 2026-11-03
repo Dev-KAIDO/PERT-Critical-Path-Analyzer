@@ -520,7 +520,8 @@ class ReviewPage(QWidget):
         self._apply_btn.clicked.connect(self.apply_requested.emit)
         bar.addWidget(self._apply_btn)
 
-        outer.addStretch(1)
+        # A-12: no dead stretch here - the splitter owns all leftover
+        # height so the decision card and its actions stay above the fold
         outer.addLayout(bar)
         return workspace
 
