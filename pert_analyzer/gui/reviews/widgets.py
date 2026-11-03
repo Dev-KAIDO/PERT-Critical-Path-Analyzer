@@ -404,13 +404,24 @@ class ImageContextView(QWidget):
         image_path: str,
         highlights: list[Any],
         image_size: Optional[tuple[int, int]] = None,
+        crop_to_highlights: bool = True,
     ) -> bool:
-        """Render the original image with overlay highlights. Returns True if shown."""
+        """Render the original image with overlay highlights. Returns True if shown.
+
+        ``crop_to_highlights=False`` keeps the whole drawing in frame - the
+        review panels want the item read ON its symbol against the full
+        drawing, not a tight sliver that loses the surrounding context.
+        """
         self._highlights = [h for h in highlights if _has_geometry(h)]
         if not self._highlights:
             self.clear()
             return False
-        pix = _render_overlay(image_path, self._highlights, image_size)
+        pix = _render_overlay(
+            image_path,
+            self._highlights,
+            image_size,
+            crop_to_highlights=crop_to_highlights,
+        )
         if pix is None:
             self.clear()
             return False
@@ -607,6 +618,7 @@ def _render_overlay(
     image_path: str,
     highlights: list[Any],
     image_size: Optional[tuple[int, int]] = None,
+    crop_to_highlights: bool = True,
 ) -> Optional[QPixmap]:
     """Render the image with translucent highlight geometry (non-destructive)."""
     try:
@@ -655,7 +667,7 @@ def _render_overlay(
     combined = Image.alpha_composite(img, overlay)
 
     # Crop to the relevant region when the highlights are small.
-    if rects:
+    if rects and crop_to_highlights:
         crop = _crop_box(img.size, rects)
         if crop is not None:
             combined = combined.crop(crop)

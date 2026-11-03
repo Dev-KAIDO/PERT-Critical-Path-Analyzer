@@ -292,7 +292,7 @@ def test_review_detail_panels_friendly_titles(qapp: QApplication) -> None:
     panel = ActivityDetailPanel()
     panel.show_item(activity, session)
     assert "Activity identity needs confirmation" in panel._card.title()
-    assert "What you can do" in panel._summary_label.text()
+    assert "The engine read this node as" in panel._summary_label.text()
 
     dep = make_review_item("dependency", geometric_node_id="N0", activity_id="A0")
     dpanel = DependencyDetailPanel()

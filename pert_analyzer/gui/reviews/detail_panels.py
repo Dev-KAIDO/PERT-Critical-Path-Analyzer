@@ -16,6 +16,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -41,6 +42,7 @@ from pert_analyzer.gui.reviews.widgets import (
 )
 from pert_analyzer.gui.themes.palette import (
     ACCENT,
+    BORDER,
     DANGER,
     SUCCESS,
     SURFACE_LIGHT,
@@ -147,7 +149,14 @@ def _reconstruction(session: Any) -> Any:
 
 
 class _BaseReviewPanel(QWidget):
-    """Shared layout for detail panels."""
+    """Shared layout for detail panels.
+
+    A-11 decision-first order: the drawing strip (your own image with the
+    item highlighted) sits at the top of the card, right under the title;
+    the single decision row follows it; technical details live below the
+    fold.  ``_render_context`` is shared by all panels and auto-focuses
+    the strip on the item's highlight when one is rendered.
+    """
 
     decision_made = Signal(object)
 
@@ -176,6 +185,8 @@ class _BaseReviewPanel(QWidget):
         self._card.set_title(text)
 
     def _add_summary_hint(self, text: str) -> QLabel:
+        """Decision copy, spoken in drawing language.  Inserted directly
+        under the drawing strip (body index 1, after the strip itself)."""
         old = getattr(self, "_summary_label", None)
         if old is not None:
             old.setParent(None)
@@ -185,8 +196,30 @@ class _BaseReviewPanel(QWidget):
         label.setFont(QFont(*MUTED_FONT))
         label.setStyleSheet(f"color: {ACCENT};")
         self._summary_label = label
-        self._body.insertWidget(0, label)
+        self._body.insertWidget(1, label)
         return label
+
+    def _add_divider(self) -> QWidget:
+        """A thin rule between the decision zone and the details."""
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet(f"background-color: {BORDER}; border: none;")
+        self._body.addWidget(divider)
+        return divider
+
+    def _render_context(self) -> None:
+        highlights = _geometry_highlights(self._item, self._category(), self._session)
+        image_path = getattr(self._session, "current_image_path", None)
+        if image_path:
+            # whole drawing in frame (A-11): the item must be read on its
+            # symbol against the user's own drawing, not a cropped sliver
+            self._context.set_context(
+                image_path, highlights, crop_to_highlights=False
+            )
+            if self._context.highlight_count:
+                # step straight to the item's own geometry: strip per
+                # item switch, wheel zooms back out for the whole view
+                self._context.focus_highlights()
 
     def set_busy(self, busy: bool) -> None:
         """Disable action buttons while an operation is in progress."""
@@ -225,38 +258,20 @@ class ActivityDetailPanel(_BaseReviewPanel):
     def __init__(self, parent: QWidget | None = None):
         super().__init__("Activity Review", parent)
 
-        self._node_label = QLabel()
-        self._current_label = QLabel()
-        self._proposed_label = QLabel()
-        self._confidence_label = QLabel()
-        self._alternatives_label = QLabel()
+        # A-11: the drawing strip opens the card - the decision is made
+        # on your own drawing, then the single action row follows it.
         self._status_badge = BadgeLabel()
-
-        self._body.addWidget(_info_row(self._body, "Geometric Node", ""))
-        self._node_label = _info_row(self._body, "Geometric Node", "")
-        self._current_label = _info_row(self._body, "Current ID", "")
-        self._proposed_label = _info_row(self._body, "Proposed", "")
-        self._confidence_label = _info_row(self._body, "OCR Confidence", "")
-        self._alternatives_label = _info_row(self._body, "Alternatives", "None", TEXT_MUTED)
-        self._body.addWidget(self._status_badge, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        self._evidence = EvidencePanel()
-        self._body.addWidget(self._evidence)
-
         self._context = ImageContextView()
         self._context.setStyleSheet("border: none;")
         self._body.addWidget(self._context)
-        self._focus_context_btn = QPushButton("Focus evidence")
-        self._focus_context_btn.setToolTip("Center the image on the highlighted activity")
-        self._focus_context_btn.clicked.connect(self._context.focus_highlights)
-        self._body.addWidget(self._focus_context_btn)
+
+        self._evidence = EvidencePanel()
 
         self._actions = _section_action_row(
             self,
             [
                 ("Accept", "ACCEPT"),
                 ("Correct...", "CORRECT"),
-                ("Leave Unresolved", "LEAVE_UNRESOLVED"),
             ],
             self._on_action,
         )
@@ -284,6 +299,16 @@ class ActivityDetailPanel(_BaseReviewPanel):
         self._feedback.setFont(QFont(*MUTED_FONT))
         self._body.addWidget(self._feedback)
 
+        # details zone: identity rows + evidence, behind a thin rule
+        self._add_divider()
+        self._node_label = _info_row(self._body, "Geometric Node", "")
+        self._current_label = _info_row(self._body, "Current ID", "")
+        self._proposed_label = _info_row(self._body, "Proposed", "")
+        self._confidence_label = _info_row(self._body, "OCR Confidence", "")
+        self._alternatives_label = _info_row(self._body, "Alternatives", "None", TEXT_MUTED)
+        self._body.addWidget(self._status_badge, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._body.addWidget(self._evidence)
+
     def _category(self) -> ReviewCategory:
         return ReviewCategory.ACTIVITIES
 
@@ -292,10 +317,14 @@ class ActivityDetailPanel(_BaseReviewPanel):
         self._session = session
         self._hide_editor()
         node_label = str(getattr(item, "geometric_node_id", "?"))
+        proposed = str(getattr(item, "proposed_activity_id", "")) or (
+            str(getattr(item, "current_activity_id", "?")) or "?"
+        )
+        pct = f"{float(getattr(item, 'confidence', 0.0) or 0.0):.0%}"
         self._set_friendly_title("Activity identity needs confirmation")
         self._add_summary_hint(
-            f"What you can do: accept the detected activity ID or correct it "
-            f"for geometric node {node_label}."
+            f"The engine read this node as {proposed} ({pct}).  "
+            f"Accept its reading, or correct the ID for {node_label}."
         )
         self._node_label.setText(node_label)
         self._current_label.setText(str(getattr(item, "current_activity_id", "?")) or "None")
@@ -318,12 +347,6 @@ class ActivityDetailPanel(_BaseReviewPanel):
         )
         self._render_context()
         self._set_feedback("")
-
-    def _render_context(self) -> None:
-        highlights = _geometry_highlights(self._item, self._category(), self._session)
-        image_path = getattr(self._session, "current_image_path", None)
-        if image_path:
-            self._context.set_context(image_path, highlights)
 
     def _on_action(self, action: str, _text: str) -> None:
         if action == "CORRECT":
@@ -370,25 +393,12 @@ class DependencyDetailPanel(_BaseReviewPanel):
     def __init__(self, parent: QWidget | None = None):
         super().__init__("Dependency Review", parent)
 
-        self._direction_label = _info_row(self._body, "Current", "")
-        self._proposed_label = _info_row(self._body, "Proposed Direction", "")
-        self._alternative_label = _info_row(self._body, "Reverse Alternative", "")
-        self._confidence_label = _info_row(self._body, "Confidence", "")
+        # A-11: drawing strip first, decisions second, details below
         self._status_badge = BadgeLabel()
-        self._body.addWidget(self._status_badge, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        self._evidence = EvidencePanel()
-        self._body.addWidget(self._evidence)
         self._context = ImageContextView()
         self._body.addWidget(self._context)
-        self._focus_context_btn = QPushButton("Focus evidence")
-        self._focus_context_btn.setToolTip("Center the image on the highlighted duration")
-        self._focus_context_btn.clicked.connect(self._context.focus_highlights)
-        self._body.addWidget(self._focus_context_btn)
-        self._focus_context_btn = QPushButton("Focus evidence")
-        self._focus_context_btn.setToolTip("Center the image on the highlighted dependency")
-        self._focus_context_btn.clicked.connect(self._context.focus_highlights)
-        self._body.addWidget(self._focus_context_btn)
+
+        self._evidence = EvidencePanel()
 
         self._actions = _section_action_row(
             self,
@@ -398,7 +408,6 @@ class DependencyDetailPanel(_BaseReviewPanel):
                 ("Reverse", "REVERSE"),
                 ("Change Source...", "CHANGE_SOURCE"),
                 ("Change Target...", "CHANGE_TARGET"),
-                ("Leave Unresolved", "LEAVE_UNRESOLVED"),
             ],
             self._on_action,
         )
@@ -428,6 +437,15 @@ class DependencyDetailPanel(_BaseReviewPanel):
         self._feedback.setFont(QFont(*MUTED_FONT))
         self._body.addWidget(self._feedback)
 
+        # details zone: live review rows + evidence, behind a thin rule
+        self._add_divider()
+        self._direction_label = _info_row(self._body, "Current", "")
+        self._proposed_label = _info_row(self._body, "Proposed Direction", "")
+        self._alternative_label = _info_row(self._body, "Reverse Alternative", "")
+        self._confidence_label = _info_row(self._body, "Confidence", "")
+        self._body.addWidget(self._status_badge, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._body.addWidget(self._evidence)
+
     def _category(self) -> ReviewCategory:
         return ReviewCategory.DEPENDENCIES
 
@@ -437,10 +455,11 @@ class DependencyDetailPanel(_BaseReviewPanel):
         self._hide_change()
         source = str(getattr(item, "current_source_id", "?"))
         target = str(getattr(item, "current_target_id", "?"))
+        pct = f"{float(getattr(item, 'confidence', 0.0) or 0.0):.0%}"
         self._set_friendly_title("Uncertain dependency")
         self._add_summary_hint(
-            f"What you can do: confirm the direction of the dependency between "
-            f"{source} and {target}, or change which nodes it connects."
+            f"The engine drew the arrow {source} -> {target} ({pct}).  "
+            f"Accept it, or fix the direction or the ends it connects."
         )
         self._direction_label.setText(str(getattr(item, "current_direction", "?")) or "?")
         self._proposed_label.setText(str(getattr(item, "proposed_direction", "")) or "None")
@@ -455,12 +474,6 @@ class DependencyDetailPanel(_BaseReviewPanel):
         )
         self._render_context()
         self._set_feedback("")
-
-    def _render_context(self) -> None:
-        highlights = _geometry_highlights(self._item, self._category(), self._session)
-        image_path = getattr(self._session, "current_image_path", None)
-        if image_path:
-            self._context.set_context(image_path, highlights)
 
     def _node_options(self) -> List[tuple[Any, Any]]:
         """[(geometric_node_id, semantic_id)] for change-source/target selection."""
@@ -521,24 +534,18 @@ class DurationDetailPanel(_BaseReviewPanel):
     def __init__(self, parent: QWidget | None = None):
         super().__init__("Duration Review", parent)
 
-        self._activity_label = _info_row(self._body, "Activity", "")
-        self._current_label = _info_row(self._body, "Current Duration", "")
-        self._proposed_label = _info_row(self._body, "Candidate Durations", "")
-        self._confidence_label = _info_row(self._body, "Confidence", "")
+        # A-11: drawing strip first, decisions second, details below
         self._status_badge = BadgeLabel()
-        self._body.addWidget(self._status_badge, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        self._evidence = EvidencePanel()
-        self._body.addWidget(self._evidence)
         self._context = ImageContextView()
         self._body.addWidget(self._context)
+
+        self._evidence = EvidencePanel()
 
         self._actions = _section_action_row(
             self,
             [
                 ("Accept", "ACCEPT"),
                 ("Correct...", "CORRECT"),
-                ("Leave Unresolved", "LEAVE_UNRESOLVED"),
             ],
             self._on_action,
         )
@@ -565,6 +572,15 @@ class DurationDetailPanel(_BaseReviewPanel):
         self._feedback.setFont(QFont(*MUTED_FONT))
         self._body.addWidget(self._feedback)
 
+        # details zone: live review rows + evidence, behind a thin rule
+        self._add_divider()
+        self._activity_label = _info_row(self._body, "Activity", "")
+        self._current_label = _info_row(self._body, "Current Duration", "")
+        self._proposed_label = _info_row(self._body, "Candidate Durations", "")
+        self._confidence_label = _info_row(self._body, "Confidence", "")
+        self._body.addWidget(self._status_badge, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._body.addWidget(self._evidence)
+
     def _category(self) -> ReviewCategory:
         return ReviewCategory.DURATIONS
 
@@ -573,15 +589,16 @@ class DurationDetailPanel(_BaseReviewPanel):
         self._session = session
         self._hide_editor()
         activity = str(getattr(item, "activity_id", "?"))
+        current = getattr(item, "current_duration", None)
+        current_text = f"{current:g}" if current is not None and not _is_nan(current) else "None"
+        pct = f"{float(getattr(item, 'confidence', 0.0) or 0.0):.0%}"
         self._set_friendly_title("Missing or invalid duration")
         self._add_summary_hint(
-            f"What you can do: accept the suggested duration or enter a "
-            f"correct value for activity {activity}."
+            f"The engine read a duration of {current_text} ({pct}) for "
+            f"{activity}.  Accept it, or type the correct value."
         )
         self._activity_label.setText(activity)
-        current = getattr(item, "current_duration", None)
-        self._current_label.setText(f"{current:g}" if current is not None and not _is_nan(current) else "None")
-        proposed = getattr(item, "proposed_duration", None)
+        self._current_label.setText(current_text)
         self._proposed_label.setText(
             "; ".join(_format_duration_candidates(item)) or "None"
         )
@@ -595,12 +612,6 @@ class DurationDetailPanel(_BaseReviewPanel):
         )
         self._render_context()
         self._set_feedback("")
-
-    def _render_context(self) -> None:
-        highlights = _geometry_highlights(self._item, self._category(), self._session)
-        image_path = getattr(self._session, "current_image_path", None)
-        if image_path:
-            self._context.set_context(image_path, highlights)
 
     def _on_action(self, action: str, _text: str) -> None:
         if action == "CORRECT":
