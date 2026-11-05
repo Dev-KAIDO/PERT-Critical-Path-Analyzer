@@ -313,134 +313,13 @@ def test_continue_button_only_enabled_when_valid(page: ValidationPage) -> None:
     assert not page._continue_btn.isEnabled()
 
 
-# ---------------------------------------------------------------------------
-# Window integration: revalidate
-# ---------------------------------------------------------------------------
-
-
-def test_revalidate_reruns_backend_and_updates_session(window: MainWindow) -> None:
-    candidate_old = valid_candidate()
-    candidate_new = invalid_candidate(
-        validation=FakeValidationResult(
-            is_valid=False, errors=[fake_issue("cycle")]
-        )
-    )
-    workflow = FakeValidatedWorkflow(
-        candidate=candidate_old, next_candidate=candidate_new
-    )
-    session = make_session(candidate_old)
-    session.workflow = workflow
-    window._session = session
-    window._refresh_pages()
-
-    assert window._session.validation_status == ValidationCenterStatus.VALID
-    window._on_revalidate()
-
-    assert window._session.candidate is candidate_new
-    assert window._session.has_applied_reviews
-    assert window._session.validation_status == ValidationCenterStatus.INVALID
-    assert not window._validation_page._continue_btn.isEnabled()
-
-
-def test_revalidate_failure_reports_feedback(window: MainWindow) -> None:
-    class BoomWorkflow(FakeValidatedWorkflow):
-        def apply(self) -> None:
-            raise RuntimeError("boom")
-
-    candidate = valid_candidate()
-    session = GuiSession()
-    session.workflow = BoomWorkflow(candidate=candidate)
-    session.complete_apply(candidate)
-    window._session = session
-    window._refresh_pages()
-
-    window._on_revalidate()
-    assert "boom" in window._validation_page._feedback.text()
-    assert window._session.candidate is candidate
-    assert window._session.validation_status == ValidationCenterStatus.VALID
-
+# A-13: window-flow tests for the retired validation page (revalidate,
+# review-issue navigation, continue gate, back/analyze) were removed with
+# the wiring itself. The page class keeps its own unit tests above.
 
 # ---------------------------------------------------------------------------
-# Window integration: Review-issue navigation
+# Window integration: results readiness
 # ---------------------------------------------------------------------------
-
-
-def _issue_window(window: MainWindow, issue, rs, valid: bool = True) -> MainWindow:
-    candidate = (
-        valid_candidate()
-        if valid
-        else invalid_candidate(
-            validation=FakeValidationResult(is_valid=False, errors=[issue])
-        )
-    )
-    session = GuiSession()
-    session.workflow = FakeValidatedWorkflow(candidate=candidate, review_session=rs)
-    session.complete_apply(candidate)
-    window._session = session
-    window._refresh_pages()
-    return window
-
-
-def test_review_issue_navigates_to_duration_item(window: MainWindow) -> None:
-    rs = make_review_session(n_activities=0, n_dependencies=0, n_durations=1)
-    window = _issue_window(window, fake_issue("missing_duration", elements=["A0"]), rs)
-    window._on_review_issue(ReviewCategory.DURATIONS, "dur:N0")
-
-    assert window._stack.currentIndex() == NavDestination.REVIEW.value
-    assert window._review_page._detail_stack.currentWidget() is window._review_page._duration_panel
-    assert window._review_page._duration_panel._item.geometric_node_id == "N0"
-
-
-def test_review_issue_navigates_to_activity_item(window: MainWindow) -> None:
-    rs = make_review_session(n_activities=2, n_dependencies=0, n_durations=0)
-    window = _issue_window(
-        window, fake_issue("duplicate_activity_id", elements=["A1"]), rs
-    )
-    window._on_review_issue(ReviewCategory.ACTIVITIES, "act:N1")
-
-    assert window._stack.currentIndex() == NavDestination.REVIEW.value
-    assert window._review_page._detail_stack.currentWidget() is window._review_page._activity_panel
-    assert window._review_page._activity_panel._item.geometric_node_id == "N1"
-
-
-def test_review_issue_navigates_to_dependency_item(window: MainWindow) -> None:
-    rs = make_review_session(n_activities=2, n_dependencies=1, n_durations=0)
-    window = _issue_window(window, fake_issue("self_loop", elements=["A0"]), rs)
-    window._on_review_issue(ReviewCategory.DEPENDENCIES, "dep:EN0")
-
-    assert window._stack.currentIndex() == NavDestination.REVIEW.value
-    assert window._review_page._detail_stack.currentWidget() is window._review_page._dependency_panel
-    assert window._review_page._dependency_panel._item.arrow_id == "EN0"
-
-
-def test_review_issue_unknown_key_does_not_break(window: MainWindow) -> None:
-    rs = make_review_session()
-    window = _issue_window(window, fake_issue("cycle"), rs)
-    window._on_review_issue(ReviewCategory.DURATIONS, "dur:missing")
-    assert window._stack.currentIndex() == NavDestination.REVIEW.value
-
-
-# ---------------------------------------------------------------------------
-# Window integration: Continue gate + results
-# ---------------------------------------------------------------------------
-
-
-def test_continue_gate_blocked_when_invalid(window: MainWindow) -> None:
-    session = make_session(invalid_candidate())
-    window._session = session
-    window._refresh_pages()
-    assert not window._validation_page._continue_btn.isEnabled()
-    window._on_continue_to_results()
-    assert window._stack.currentIndex() != NavDestination.RESULTS.value
-
-
-def test_continue_gate_allows_valid_and_navigates(window: MainWindow) -> None:
-    session = make_session(valid_candidate())
-    window._session = session
-    window._refresh_pages()
-    assert window._validation_page._continue_btn.isEnabled()
-    window._on_continue_to_results()
-    assert window._stack.currentIndex() == NavDestination.RESULTS.value
 
 
 def test_results_page_not_ready_when_invalid(window: MainWindow) -> None:
@@ -454,16 +333,3 @@ def test_results_page_shows_results_when_valid(window: MainWindow) -> None:
     window._on_nav(NavDestination.RESULTS)
     assert window._results_page._empty_label.isHidden()
     assert "Project duration" in window._results_page._summary_label.text()
-
-
-def test_back_to_review_navigates(window: MainWindow) -> None:
-    window._session = make_session(valid_candidate())
-    window._on_nav(NavDestination.VALIDATE)
-    window._validation_page._back_btn.click()
-    assert window._stack.currentIndex() == NavDestination.REVIEW.value
-
-
-def test_empty_state_go_analyze_navigates(window: MainWindow) -> None:
-    window._on_nav(NavDestination.VALIDATE)
-    window._validation_page._go_analyze_btn.click()
-    assert window._stack.currentIndex() == NavDestination.ANALYZE.value

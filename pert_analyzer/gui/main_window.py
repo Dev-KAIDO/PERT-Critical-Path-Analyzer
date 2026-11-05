@@ -101,7 +101,6 @@ class _WorkflowPath(QWidget):
         NavDestination.ANALYZE,
         NavDestination.UNDERSTANDING,
         NavDestination.REVIEW,
-        NavDestination.VALIDATE,
         NavDestination.RESULTS,
     )
 
@@ -413,11 +412,11 @@ class MainWindow(QMainWindow):
 
     def _update_workflow_indicator(self) -> None:
         """State-aware workflow step indicator (done/current/blocked/pending)."""
+        # A-13: validation retired from the flow; five working steps
         steps = [
             (NavDestination.ANALYZE, "Analyze"),
             (NavDestination.UNDERSTANDING, "Understand"),
             (NavDestination.REVIEW, "Review"),
-            (NavDestination.VALIDATE, "Validate"),
             (NavDestination.RESULTS, "Results"),
         ]
         current_idx = self._stack.currentIndex()
@@ -442,11 +441,6 @@ class MainWindow(QMainWindow):
                 if getattr(self._session, "has_applied_reviews", False):
                     return True
                 return self._session.review_item_total() == 0
-            if dest == NavDestination.VALIDATE:
-                return status in (
-                    ValidationCenterStatus.VALID,
-                    ValidationCenterStatus.INVALID,
-                )
             if dest == NavDestination.RESULTS:
                 return (
                     state_value in ("RESULTS_AVAILABLE", "READY_FOR_RESULTS")
@@ -464,8 +458,6 @@ class MainWindow(QMainWindow):
                     self._session.pending_review_total() > 0
                     or status == ValidationCenterStatus.BLOCKED_REVIEW
                 )
-            if dest == NavDestination.VALIDATE:
-                return status == ValidationCenterStatus.INVALID
             return False
 
         nav_map = {item.destination: item for item in NAV_ITEMS}
@@ -507,23 +499,13 @@ class MainWindow(QMainWindow):
             lambda: self._on_nav(NavDestination.REVIEW)
         )
         self._review_page.apply_requested.connect(self._on_apply_review_decisions)
+        # A-13: validation page retired from the flow; the review "Go to
+        # Results" button jumps straight to the results step
         self._review_page.validate_requested.connect(
-            lambda: self._on_nav(NavDestination.VALIDATE)
+            lambda: self._on_nav(NavDestination.RESULTS)
         )
-        self._validation_page.revalidate_requested.connect(self._on_revalidate)
-        self._validation_page.continue_requested.connect(self._on_continue_to_results)
-        self._validation_page.back_to_review.connect(
-            lambda: self._on_nav(NavDestination.REVIEW)
-        )
-        self._validation_page.go_analyze.connect(
-            lambda: self._on_nav(NavDestination.ANALYZE)
-        )
-        self._validation_page.review_issue_requested.connect(self._on_review_issue)
         self._results_page.go_review.connect(
             lambda: self._on_nav(NavDestination.REVIEW)
-        )
-        self._results_page.go_validation.connect(
-            lambda: self._on_nav(NavDestination.VALIDATE)
         )
         self._results_page.calculate_requested.connect(self._on_calculate_results)
         self._results_page.export_requested.connect(self._on_export_results)
@@ -845,8 +827,24 @@ class MainWindow(QMainWindow):
         self._review_page.set_busy(False)
         self._session.complete_apply(candidate)
         self._refresh_pages()
-        self.statusBar().showMessage("Review decisions applied")
-        self._on_nav(NavDestination.VALIDATE)
+        # A-13: validation page retired; a clean graph lands on Results
+        # straight away, otherwise the review workspace hosts the feedback
+        status = self._session.validation_status
+        if status == ValidationCenterStatus.VALID:
+            self.statusBar().showMessage("Review decisions applied; graph valid")
+            self._on_nav(NavDestination.RESULTS)
+        else:
+            issues = self._session.validation_issue_count
+            self.statusBar().showMessage(
+                f"Review decisions applied; graph not ready ({issues} issue(s))"
+            )
+            self._review_page.show_feedback(
+                f"Graph check is not ready yet ({issues} issue(s)). "
+                "Open the affected review items and reapply.",
+                error=True,
+            )
+            self._on_nav(NavDestination.REVIEW)
+            self._sync_topbar()
         logger.info("Review decisions applied")
 
     def _on_apply_failed(self, msg: str) -> None:
@@ -942,64 +940,6 @@ class MainWindow(QMainWindow):
         self._results_page.refresh(self._session)
         self.statusBar().showMessage("PERT analysis completed")
 
-    # ------------------------------------------------------------------
-    # Validation center
-    # ------------------------------------------------------------------
-
-    def _on_revalidate(self) -> None:
-        """Re-run the backend validation path on the current reviewed graph."""
-        if self._apply_worker is not None:
-            return
-        workflow = self._session.workflow
-        if workflow is None or not callable(getattr(workflow, "apply", None)):
-            return
-        if self._session.pending_review_total() > 0:
-            self.statusBar().showMessage("Finish the review before revalidating")
-            self._on_nav(NavDestination.REVIEW)
-            return
-
-        self._validation_page.set_busy(True)
-        self.statusBar().showMessage("Revalidating...")
-        try:
-            candidate = workflow.apply()
-        except Exception as exc:  # noqa: BLE001
-            self._session.fail_apply(str(exc))
-            self._sync_topbar()
-            self._validation_page.set_busy(False)
-            self._refresh_pages()
-            self._validation_page.set_feedback(f"Revalidation failed: {exc}", error=True)
-            self.statusBar().showMessage(f"Revalidation failed: {exc}")
-            return
-
-        self._validation_page.set_busy(False)
-        if candidate is None:
-            self._session.fail_apply("Revalidation returned no candidate")
-            self._sync_topbar()
-            self._refresh_pages()
-            self._validation_page.set_feedback(
-                "Revalidation returned no candidate", error=True
-            )
-            self.statusBar().showMessage("Revalidation returned no candidate")
-            return
-
-        self._session.complete_apply(candidate)
-        self._sync_topbar()
-        self._refresh_pages()
-        status = self._session.validation_status
-        if status == ValidationCenterStatus.VALID:
-            self.statusBar().showMessage("Graph is valid and ready for CPM")
-        elif status == ValidationCenterStatus.INVALID:
-            self.statusBar().showMessage("Graph is invalid; resolve the issues above")
-        else:
-            self.statusBar().showMessage(f"Graph validation status: {status.value}")
-        logger.info("Revalidation completed: %s", status.value)
-
-    def _on_review_issue(self, category, key: str) -> None:
-        """Navigate to the Review Center and select the affected item."""
-        self._on_nav(NavDestination.REVIEW)
-        if not self._review_page.focus_item(category, key):
-            self.statusBar().showMessage("Could not open the requested review item")
-
     def _on_manual_analyze(self) -> None:
         """Handle Analyze from Network Builder — create candidate and go to Results."""
         import logging
@@ -1033,13 +973,6 @@ class MainWindow(QMainWindow):
         _log.info("[NAV] Navigating to Results...")
         self._on_nav(NavDestination.RESULTS)
         _log.info("[RESULTS] Navigation complete")
-
-    def _on_continue_to_results(self) -> None:
-        """Move to Results only when the graph is valid and CPM-ready."""
-        if self._session.validation_status != ValidationCenterStatus.VALID:
-            self.statusBar().showMessage("Finish validation before viewing results")
-            return
-        self._on_nav(NavDestination.RESULTS)
 
     # ------------------------------------------------------------------
     # Unsaved-decision guard
@@ -1077,7 +1010,6 @@ class MainWindow(QMainWindow):
             self._analysis_page,
             self._understanding_page,
             self._review_page,
-            self._validation_page,
             self._results_page,
         ]:
             if hasattr(page, "refresh"):

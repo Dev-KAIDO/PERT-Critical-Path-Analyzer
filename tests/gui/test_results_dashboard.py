@@ -313,10 +313,8 @@ def test_not_ready_buttons_navigate(window: MainWindow) -> None:
     window._on_nav(NavDestination.RESULTS)
     window._results_page._go_review_btn.click()
     assert window._stack.currentIndex() == NavDestination.REVIEW.value
-    window._session = session
-    window._on_nav(NavDestination.RESULTS)
-    window._results_page._go_validation_btn.click()
-    assert window._stack.currentIndex() == NavDestination.VALIDATE.value
+    # A-13: the results "Open Validation" action is retired
+    assert not hasattr(window._results_page, "_go_validation_btn")
 
 
 # ---------------------------------------------------------------------------

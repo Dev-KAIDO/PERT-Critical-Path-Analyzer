@@ -99,7 +99,6 @@ class ResultsPage(QWidget):
     """Full analytical Results dashboard."""
 
     go_review = Signal()
-    go_validation = Signal()
     calculate_requested = Signal()
     pert_run_requested = Signal()
     export_requested = Signal()
@@ -247,15 +246,12 @@ class ResultsPage(QWidget):
         actions.addStretch()
         self._go_review_btn = QPushButton("Continue Review")
         self._go_review_btn.clicked.connect(self.go_review)
-        self._go_validation_btn = QPushButton("Open Validation")
-        self._go_validation_btn.clicked.connect(self.go_validation)
         self._calculate_btn = QPushButton("Calculate Results")
         self._calculate_btn.setToolTip(
             "Run the existing CPM service for this valid graph"
         )
         self._calculate_btn.clicked.connect(self._on_calculate_clicked)
         actions.addWidget(self._go_review_btn)
-        actions.addWidget(self._go_validation_btn)
         actions.addWidget(self._calculate_btn)
         actions.addStretch()
         layout.addLayout(actions)
@@ -446,7 +442,6 @@ class ResultsPage(QWidget):
         self._overview.open_paths_requested.connect(
             lambda: self._tabs.setCurrentWidget(self._critical_paths)
         )
-        self._overview.open_validation_requested.connect(self.go_validation)
         self._pert.pert_run_requested.connect(self._on_pert_run_clicked)
         scroll = QScrollArea()
         scroll.setObjectName("resultsDashboardScroll")

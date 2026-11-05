@@ -173,7 +173,6 @@ class OverviewTab(QWidget):
     open_network_requested = Signal()
     open_activities_requested = Signal()
     open_paths_requested = Signal()
-    open_validation_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -279,9 +278,6 @@ class OverviewTab(QWidget):
         self._health_score_caption.setStyleSheet(f"color: {SUCCESS};")
         header.addWidget(self._health_score_caption)
         header.addStretch()
-        self._health_button = self._action_button("View validation")
-        self._health_button.clicked.connect(self.open_validation_requested)
-        header.addWidget(self._health_button)
         layout.addLayout(header)
         self._health_checks = QLabel("")
         self._health_checks.setWordWrap(True)

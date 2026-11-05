@@ -122,7 +122,7 @@ class EmptyReviewState(QWidget):
         self._message.setStyleSheet(f"color: {TEXT_MUTED};")
         layout.addWidget(self._message)
 
-        self._go_btn = QPushButton("Go to Validation")
+        self._go_btn = QPushButton("Go to Results")
         self._go_btn.setObjectName("primary")
         self._go_btn.clicked.connect(self.go_validation.emit)
         layout.addWidget(self._go_btn, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -236,7 +236,7 @@ class ReviewCompleteState(QWidget):
         self._apply_btn = QPushButton("Apply & Validate")
         self._apply_btn.setObjectName("primary")
         self._apply_btn.clicked.connect(self.apply_requested.emit)
-        self._go_btn = QPushButton("Go to Validation")
+        self._go_btn = QPushButton("Go to Results")
         self._go_btn.setObjectName("primary")
         self._go_btn.clicked.connect(self.go_validation.emit)
         self._go_btn.hide()
@@ -905,6 +905,10 @@ class ReviewPage(QWidget):
         color = DANGER if error else SUCCESS
         self._feedback.setText(text)
         self._feedback.setStyleSheet(f"color: {color};")
+
+    def show_feedback(self, text: str, error: bool = False) -> None:
+        """Public feedback hook for the window-level apply flow (A-13)."""
+        self._show_feedback(text, error)
 
     @property
     def is_busy(self) -> bool:

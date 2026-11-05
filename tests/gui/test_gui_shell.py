@@ -40,11 +40,6 @@ def test_review_page_empty_state(window: MainWindow) -> None:
     assert "No analysis available" in window._review_page.empty_message
 
 
-def test_validation_page_empty_state(window: MainWindow) -> None:
-    window._on_nav(NavDestination.VALIDATE)
-    assert "No project analyzed" in window._validation_page._empty_label.text()
-
-
 def test_results_page_empty_state(window: MainWindow) -> None:
     window._on_nav(NavDestination.RESULTS)
     assert "No project analyzed" in window._results_page._empty_label.text()

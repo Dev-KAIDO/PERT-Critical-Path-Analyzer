@@ -23,7 +23,7 @@ from pert_analyzer.gui.reviews import context as review_context
 from pert_analyzer.gui.reviews.categories import ReviewCategory
 from pert_analyzer.gui.reviews.detail_panels import ReviewActionRequest
 from pert_analyzer.gui.reviews.widgets import EvidencePanel, ImageContextView
-from pert_analyzer.gui.session import AppState, GuiSession
+from pert_analyzer.gui.session import AppState, GuiSession, ValidationCenterStatus
 from pert_analyzer.pipeline.human_review import ReviewStatus
 from tests.gui.fakes import (
     FakeReviewedWorkflow,
@@ -516,7 +516,12 @@ def test_apply_decisions_updates_state_and_navigates(
     assert wait_for(qapp, lambda: window._apply_worker is None, timeout=10.0)
     assert window._session.has_applied_reviews
     assert window._session.state == AppState.VALIDATION_REQUIRED
-    assert window._stack.currentIndex() == NavDestination.VALIDATE.value
+    # A-13: apply routes Results directly when the graph validates clean,
+    # otherwise it stays in the review workspace with feedback
+    if window._session.validation_status == ValidationCenterStatus.VALID:
+        assert window._stack.currentIndex() == NavDestination.RESULTS.value
+    else:
+        assert window._stack.currentIndex() == NavDestination.REVIEW.value
 
 
 def test_apply_failure_returns_to_review(

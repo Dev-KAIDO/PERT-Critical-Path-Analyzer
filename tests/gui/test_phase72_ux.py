@@ -69,7 +69,7 @@ def test_main_window_responsive_minimum(qapp: QApplication) -> None:
     window.resize(1280, 720)
     qapp.processEvents()
     assert window.width() >= 1100
-    assert len(window._nav_buttons) == 6
+    assert len(window._nav_buttons) == 5  # A-13: Validate retired from the flow
     for item in window._nav_buttons.keys():
         assert isinstance(item, int)
     window.close()
@@ -434,7 +434,7 @@ def test_results_no_analysis_empty_state_has_actions(qapp: QApplication) -> None
     page.refresh(GuiSession())
     assert page.stack_index() == page._EMPTY
     assert page._go_review_btn.text() == "Continue Review"
-    assert page._go_validation_btn.text() == "Open Validation"
+    assert not hasattr(page, "_go_validation_btn")  # A-13: retired
     page.deleteLater()
 
 

@@ -108,10 +108,9 @@ def test_nav_buttons_have_object_names(window: MainWindow) -> None:
         "nav_analyze",
         "nav_understanding",
         "nav_review",
-        "nav_validate",
         "nav_results",
         "nav_network_builder",
-    }
+    }  # A-13: nav_validate retired
 
 
 def test_nav_buttons_styled_for_active_state(window: MainWindow) -> None:

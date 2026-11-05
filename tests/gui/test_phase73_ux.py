@@ -108,11 +108,13 @@ def test_nav_has_understanding_between_analyze_and_review(window: MainWindow) ->
     assert "Understand" in understand.text()
 
 
-def test_workflow_indicator_has_five_named_steps(window: MainWindow) -> None:
+def test_workflow_indicator_has_four_named_steps(window: MainWindow) -> None:
     window._update_workflow_indicator()
     text = window._workflow_indicator.text()
-    for step in ("Analyze", "Understand", "Review", "Validate", "Results"):
+    # A-13: validation retired from the step flow
+    for step in ("Analyze", "Understand", "Review", "Results"):
         assert step in text
+    assert "Validate" not in text
     assert window._stack.count() == 6
 
 
