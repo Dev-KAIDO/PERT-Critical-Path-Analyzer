@@ -888,6 +888,8 @@ class ReviewPage(QWidget):
                     request.item.geometric_node_id,
                     "CORRECT",
                     corrected_duration=request.corrected_value,
+                    corrected_optimistic=request.corrected_optimistic,
+                    corrected_pessimistic=request.corrected_pessimistic,
                 )
             if action == "ACCEPT":
                 return session.decide_duration(request.item.geometric_node_id, "ACCEPT")

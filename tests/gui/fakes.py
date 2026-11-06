@@ -235,10 +235,16 @@ class FakeReviewedWorkflow:
         )
         return bool(ok)
 
-    def decide_duration(self, geometric_node_id, decision, corrected_duration=None, reason="", comment=""):
+    def decide_duration(
+        self, geometric_node_id, decision, corrected_duration=None,
+        corrected_optimistic=None, corrected_pessimistic=None,
+        reason="", comment="",
+    ):
         ok, _ = self.review_session.decide_duration(
             geometric_node_id, decision,
             corrected_duration=corrected_duration,
+            corrected_optimistic=corrected_optimistic,
+            corrected_pessimistic=corrected_pessimistic,
             reason=reason, comment=comment, return_item=True,
         )
         return bool(ok)

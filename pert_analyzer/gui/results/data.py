@@ -334,7 +334,7 @@ def _duration_reviews(session: Any) -> List[Any]:
     return list(items)
 
 
-def _duration_item_candidates(item: Any) -> List[float]:
+def duration_item_candidates(item: Any) -> List[float]:
     """Distinct positive durations mentioned by one review item.
 
     Mirrors the review detail panel: the current/proposed durations plus
@@ -404,7 +404,7 @@ def derived_pert_estimates(session: Any) -> Dict[str, PertEstimate]:
             out[aid] = PertEstimate(0.0, 0.0, 0.0)
             continue
         item = by_node.get(_activity_node_id(act)) or by_aid.get(aid)
-        candidates = _duration_item_candidates(item) if item is not None else []
+        candidates = duration_item_candidates(item) if item is not None else []
         if len(candidates) >= 2:
             a = min(min(candidates), m)
             p = max(max(candidates), m)
@@ -446,21 +446,59 @@ class PertData:
     estimates_source: str = ""  # "manual" / "graph" / "derived" / ""
 
 
+def _graph_full_omp(graph: Any) -> bool:
+    """True when every activity carries a complete O/M/P field set."""
+    activities = getattr(graph, "activities", None) or {}
+    if not activities:
+        return False
+    for act in activities.values():
+        if (
+            getattr(act, "optimistic_time", None) is None
+            or getattr(act, "most_likely_time", None) is None
+            or getattr(act, "pessimistic_time", None) is None
+        ):
+            return False
+    return True
+
+
 def effective_pert_estimates(session: Any) -> Optional[Dict[str, PertEstimate]]:
     """The source of estimates for an analysis.
 
-    Precedence: manual entries on the session win; otherwise ``None``
-    tells the engine to read the O/M/P fields carried by the GraphModel
-    activities; when no field exists anywhere, three-point estimates are
-    derived automatically (see derived_pert_estimates).
+    Precedence: manual entries on the session win; otherwise: when the
+    graph carries a complete O/M/P set, ``None`` lets the engine read the
+    fields directly; when fields are partial (A-15 corrections), the
+    O/M/P values win per field and derived_pert_estimates fills the
+    rest; with no fields at all the derived mapping is returned as is.
     """
     manual = getattr(session, "pert_estimates", None) or {}
     if manual:
         return manual
-    if _graph_carries_omp(getattr(session, "graph_model", None)):
+    graph = getattr(session, "graph_model", None)
+    activities = getattr(graph, "activities", None) or {} if graph else {}
+    if not activities:
         return None
     derived = derived_pert_estimates(session)
-    return derived if derived else None
+    if not derived:
+        return None
+    if _graph_full_omp(graph):
+        return None
+    if not _graph_carries_omp(graph):
+        return derived
+    merged: Dict[str, PertEstimate] = {}
+    for aid, est in derived.items():
+        act = activities.get(aid)
+        if act is None:
+            merged[aid] = est
+            continue
+        o = getattr(act, "optimistic_time", None)
+        m = getattr(act, "most_likely_time", None)
+        p = getattr(act, "pessimistic_time", None)
+        merged[aid] = PertEstimate(
+            optimistic=o if o is not None else est.optimistic,
+            most_likely=m if m is not None else est.most_likely,
+            pessimistic=p if p is not None else est.pessimistic,
+        )
+    return merged
 
 
 def pert_estimates_source(session: Any) -> str:

@@ -91,6 +91,72 @@ def validate_duration(text: str) -> ValidationResult:
     return ValidationResult(ok=True, value=value)
 
 
+def _duration_component(label: str, text: str) -> ValidationResult:
+    """One non-empty positive number component of a three-point entry."""
+    text = text.strip()
+    if not text:
+        return ValidationResult(
+            ok=False, value=None, message=f"{label} cannot be empty"
+        )
+    try:
+        value = float(text)
+    except ValueError:
+        return ValidationResult(
+            ok=False, value=None, message=f"{label} is not a valid number"
+        )
+    if math.isnan(value):
+        return ValidationResult(
+            ok=False, value=None, message=f"{label} cannot be NaN"
+        )
+    if math.isinf(value):
+        return ValidationResult(
+            ok=False, value=None, message=f"{label} cannot be infinite"
+        )
+    if value <= 0:
+        return ValidationResult(
+            ok=False, value=None, message=f"{label} must be positive"
+        )
+    return ValidationResult(ok=True, value=value)
+
+
+def validate_duration_triplet(
+    optimistic_text: str,
+    most_likely_text: str,
+    pessimistic_text: str,
+) -> ValidationResult:
+    """
+    Validate a corrected three-point estimate (O <= M <= P) for the
+    three-point duration editor (A-15).
+
+    Returns a ValidationResult whose value is the (o, m, p) float tuple;
+    the pipeline re-checks the same ordering when the decision is applied.
+    """
+    for label, text in (
+        ("Optimistic (O)", optimistic_text),
+        ("Most Likely (M)", most_likely_text),
+        ("Pessimistic (P)", pessimistic_text),
+    ):
+        result = _duration_component(label, text)
+        if not result.ok:
+            return result
+    o = float(optimistic_text)
+    m = float(most_likely_text)
+    p = float(pessimistic_text)
+    if o > m:
+        return ValidationResult(
+            ok=False,
+            value=None,
+            message=f"Optimistic (O) {o:g} exceeds Most Likely (M) {m:g}",
+        )
+    if p < m:
+        return ValidationResult(
+            ok=False,
+            value=None,
+            message=f"Pessimistic (P) {p:g} is below Most Likely (M) {m:g}",
+        )
+    return ValidationResult(ok=True, value=(o, m, p))
+
+
 def geometric_node_label(geometric_node_id: Any, semantic_id: Optional[str]) -> str:
     """Human-friendly label for a geometric node."""
     g = str(geometric_node_id) if geometric_node_id is not None else "?"

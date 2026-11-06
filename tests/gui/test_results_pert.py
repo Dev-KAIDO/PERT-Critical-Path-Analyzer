@@ -367,3 +367,30 @@ def test_network_toggle_renders_pert_expected_times(qapp: QApplication) -> None:
     network.set_metric_mode("CPM")
     assert network.node_items()["A0"].duration == 5.0
     assert network.node_items()["A0"].metric_label == "Duration"
+
+
+def test_partial_graph_fields_merge_with_derivation() -> None:
+    """A-15 corrections land as partial O/M/P fields: they win per field."""
+    graph = SimpleNamespace(
+        activities={
+            "A0": SimpleNamespace(
+                id="A0", activity_id="A0", duration=7.0,
+                optimistic_time=5.0, most_likely_time=7.0,
+                pessimistic_time=9.0,
+            ),
+            "A1": SimpleNamespace(
+                id="A1", activity_id="A1", duration=4.0,
+                optimistic_time=None, most_likely_time=None,
+                pessimistic_time=None,
+            ),
+        },
+        dependencies=[],
+    )
+    session = SimpleNamespace(
+        graph_model=graph, pert_estimates={}, review_session=None,
+    )
+
+    est = effective_pert_estimates(session)
+    assert est["A0"] == PertEstimate(5.0, 7.0, 9.0)
+    assert est["A1"] == PertEstimate(3.0, 4.0, 5.0)  # derived +/-25% band
+    assert pert_estimates_source(session) == "graph"

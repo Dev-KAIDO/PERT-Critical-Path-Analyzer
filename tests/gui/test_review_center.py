@@ -285,8 +285,8 @@ def test_correct_duration(page: ReviewPage, session: GuiSession) -> None:
 @pytest.mark.parametrize(
     ("text", "fragment"),
     [
-        ("0", "zero"),
-        ("-3", "positive"),
+        ("0", "must be positive"),
+        ("-3", "must be positive"),
         ("abc", "Not a valid number"),
         ("nan", "NaN"),
         ("1e999", "infinite"),
@@ -300,7 +300,9 @@ def test_invalid_duration_rejected_inline(
     item = page._duration_panel._item
     panel = page._duration_panel
     panel._on_action("CORRECT", "Correct...")
-    panel._dur_edit.setText(text)
+    panel._o_edit.setText("1")
+    panel._m_edit.setText(text)
+    panel._p_edit.setText("3")
     panel._apply_edit.click()
     assert fragment.lower() in panel._feedback.text().lower()
     assert item.status == ReviewStatus.PENDING

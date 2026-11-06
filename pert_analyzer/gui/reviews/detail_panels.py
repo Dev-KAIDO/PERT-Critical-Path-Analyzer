@@ -31,9 +31,10 @@ from pert_analyzer.gui.reviews.actions import (
     geometric_node_label,
     is_duplicate_activity_id,
     validate_activity_id,
-    validate_duration,
+    validate_duration_triplet,
 )
 from pert_analyzer.gui.reviews.categories import ReviewCategory
+from pert_analyzer.gui.results.data import duration_item_candidates
 from pert_analyzer.gui.reviews.widgets import (
     BadgeLabel,
     EvidencePanel,
@@ -64,6 +65,9 @@ class ReviewActionRequest:
     item: Any
     action: str
     corrected_value: Any = None
+    # A-15: three-point corrections ride the request for duration items.
+    corrected_optimistic: Any = None
+    corrected_pessimistic: Any = None
     comment: str = ""
     reason: str = ""
 
@@ -231,13 +235,21 @@ class _BaseReviewPanel(QWidget):
     def _busy_safe(self) -> Optional[QPushButton]:
         return None
 
-    def _emit(self, action: str, corrected_value: Any = None) -> None:
+    def _emit(
+        self,
+        action: str,
+        corrected_value: Any = None,
+        corrected_optimistic: Any = None,
+        corrected_pessimistic: Any = None,
+    ) -> None:
         self.decision_made.emit(
             ReviewActionRequest(
                 category=self._category(),
                 item=self._item,
                 action=action,
                 corrected_value=corrected_value,
+                corrected_optimistic=corrected_optimistic,
+                corrected_pessimistic=corrected_pessimistic,
             )
         )
 
@@ -551,13 +563,23 @@ class DurationDetailPanel(_BaseReviewPanel):
         )
         self._body.addWidget(self._actions)
 
+        # A-15: three-point correction editor (O <= M <= P)
         self._edit_row = QWidget()
         ed_layout = QHBoxLayout(self._edit_row)
         ed_layout.setContentsMargins(0, 0, 0, 0)
-        ed_layout.setSpacing(6)
-        self._dur_edit = QLineEdit()
-        self._dur_edit.setPlaceholderText("Enter positive duration...")
-        ed_layout.addWidget(self._dur_edit, stretch=1)
+        ed_layout.setSpacing(4)
+        self._triplet_hint = QLabel("O <= M <= P")
+        self._triplet_hint.setFont(QFont(*MUTED_FONT))
+        self._triplet_hint.setStyleSheet(f"color: {TEXT_MUTED};")
+        ed_layout.addWidget(self._triplet_hint)
+        self._o_edit = QLineEdit()
+        self._o_edit.setPlaceholderText("Opt. (O)")
+        self._m_edit = QLineEdit()
+        self._m_edit.setPlaceholderText("Most likely (M)")
+        self._p_edit = QLineEdit()
+        self._p_edit.setPlaceholderText("Pess. (P)")
+        for edit in (self._o_edit, self._m_edit, self._p_edit):
+            ed_layout.addWidget(edit, stretch=1)
         self._apply_edit = QPushButton("Apply")
         self._apply_edit.clicked.connect(self._apply_correction)
         ed_layout.addWidget(self._apply_edit)
@@ -615,24 +637,63 @@ class DurationDetailPanel(_BaseReviewPanel):
 
     def _on_action(self, action: str, _text: str) -> None:
         if action == "CORRECT":
-            self._edit_row.show()
-            self._dur_edit.setFocus()
+            self._show_triplet_editor()
             self._set_feedback("")
             return
         self._emit(action)
 
+    def _show_triplet_editor(self) -> None:
+        """Prefill O/M/P so touching Apply adopts the derivation (A-14/A-15).
+
+        ``m`` is the accepted duration (or the CV-proposed fallback); the
+        spread reuses the derivation rules: review-candidate extremes when
+        two or more distinct numbers exist, otherwise a +/-25% band.
+        """
+        item = self._item
+        m = getattr(item, "current_duration", None)
+        if m is None or _is_nan(m):
+            m = getattr(item, "proposed_duration", None)
+            if m is not None and _is_nan(m):
+                m = None
+        a_text = p_text = m_text = ""
+        if m is not None and m > 0:
+            candidates = duration_item_candidates(item) or []
+            if len(candidates) >= 2:
+                a_val = min(min(candidates), m)
+                p_val = max(max(candidates), m)
+            else:
+                a_val = m * 0.75
+                p_val = m * 1.25
+            a_text = f"{a_val:g}"
+            m_text = f"{m:g}"
+            p_text = f"{p_val:g}"
+        self._o_edit.setText(a_text)
+        self._m_edit.setText(m_text)
+        self._p_edit.setText(p_text)
+        self._edit_row.show()
+        self._m_edit.setFocus()
+
     def _apply_correction(self) -> None:
-        result = validate_duration(self._dur_edit.text())
+        result = validate_duration_triplet(
+            self._o_edit.text(), self._m_edit.text(), self._p_edit.text()
+        )
         if not result.ok:
             self._set_feedback(result.message, error=True)
             return
+        o, m, p = result.value
         self._hide_editor()
         self._set_feedback("")
-        self._emit("CORRECT", result.value)
+        self._emit(
+            "CORRECT",
+            m,
+            corrected_optimistic=o,
+            corrected_pessimistic=p,
+        )
 
     def _hide_editor(self) -> None:
         self._edit_row.hide()
-        self._dur_edit.clear()
+        for edit in (self._o_edit, self._m_edit, self._p_edit):
+            edit.clear()
 
     def _set_feedback(self, text: str, error: bool = False) -> None:
         color = DANGER if error else SUCCESS

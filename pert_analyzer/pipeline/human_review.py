@@ -472,6 +472,9 @@ class DurationReview:
     reason: str = ""
     status: ReviewStatus = ReviewStatus.PENDING
     corrected_duration: Optional[float] = None
+    # A-15: corrected three-point extremes (m lives in corrected_duration).
+    corrected_optimistic: Optional[float] = None
+    corrected_pessimistic: Optional[float] = None
     user_decision: Optional[str] = None
     comment: str = ""
     timestamp: str = ""
@@ -497,6 +500,8 @@ class DurationReview:
             "reason": self.reason,
             "status": self.status.value,
             "corrected_duration": self.corrected_duration,
+            "corrected_optimistic": self.corrected_optimistic,
+            "corrected_pessimistic": self.corrected_pessimistic,
             "user_decision": self.user_decision,
             "comment": self.comment,
             "timestamp": self.timestamp,
@@ -516,6 +521,8 @@ class DurationReview:
             reason=data.get("reason", ""),
             status=ReviewStatus[data["status"]],
             corrected_duration=data.get("corrected_duration"),
+            corrected_optimistic=data.get("corrected_optimistic"),
+            corrected_pessimistic=data.get("corrected_pessimistic"),
             user_decision=data.get("user_decision"),
             comment=data.get("comment", ""),
             timestamp=data.get("timestamp", ""),
@@ -813,6 +820,8 @@ class ReviewSession:
         geometric_node_id: str,
         decision: str,
         corrected_duration: Optional[float] = None,
+        corrected_optimistic: Optional[float] = None,
+        corrected_pessimistic: Optional[float] = None,
         reason: str = "",
         comment: str = "",
         return_item: bool = False,
@@ -850,11 +859,38 @@ class ReviewSession:
                     "corrected_duration is required for CORRECT decision"
                 )
             item.corrected_duration = float(corrected_duration)
+            m = item.corrected_duration
+            # A-15: optional corrected O/P extremes ride the same decision;
+            # PERT validation requires 0 <= O <= M <= P on the graph side.
+            if corrected_optimistic is not None:
+                o = float(corrected_optimistic)
+                if o < 0:
+                    raise ValueError(
+                        "corrected_optimistic must be non-negative"
+                    )
+                if o > m:
+                    raise ValueError(
+                        f"corrected_optimistic ({o}) exceeds corrected "
+                        f"duration ({m}); O must be <= M"
+                    )
+                item.corrected_optimistic = o
+            if corrected_pessimistic is not None:
+                p = float(corrected_pessimistic)
+                if p < 0:
+                    raise ValueError(
+                        "corrected_pessimistic must be non-negative"
+                    )
+                if p < m:
+                    raise ValueError(
+                        f"corrected_pessimistic ({p}) is below the corrected "
+                        f"duration ({m}); P must be >= M"
+                    )
+                item.corrected_pessimistic = p
             item.status = ReviewStatus.CORRECTED
             item.duration_status = DurationStatus.CORRECTED
             self._record(
                 "duration", geometric_node_id, "CORRECT_DURATION",
-                item.current_duration, float(corrected_duration),
+                item.current_duration, item.corrected_duration,
                 reason, comment, item.geometric_node_id or "",
             )
         elif decision == "LEAVE_UNRESOLVED":
@@ -1895,10 +1931,34 @@ def _build_graph_model(
 
     gm = GraphModel(diagram_type=DiagramType.AON)
     for node, final_id, duration, is_dummy, act in activities_out:
+        drev = (
+            session.get_duration_review(node)
+            if session is not None
+            else None
+        )
+        opt = pes = None
+        # A-15: corrected three-point extremes land directly on the graph
+        # activity; the engine reads them natively and they beat the
+        # derived +/-25% fallback.
+        if (
+            drev is not None
+            and drev.status == ReviewStatus.CORRECTED
+            and (
+                drev.corrected_optimistic is not None
+                or drev.corrected_pessimistic is not None
+            )
+        ):
+            opt = drev.corrected_optimistic
+            pes = drev.corrected_pessimistic
         cact = CoreActivity(
             activity_id=final_id,
             name=getattr(act, "label", "") or final_id,
             duration=duration,
+            optimistic_time=opt,
+            most_likely_time=(
+                duration if opt is not None or pes is not None else None
+            ),
+            pessimistic_time=pes,
             confidence=getattr(act, "confidence", 0.0) or 0.0,
             is_dummy=bool(is_dummy),
             metadata={
