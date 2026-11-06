@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/pert-pipeline-map.svg" alt="PERT Analyzer automated pipeline" width="100%">
+<img src="docs/pert-cover.svg" alt="PERT Analyzer blueprint cover" width="100%">
 
 # PERT & Critical Path Analyzer
 
@@ -39,7 +39,7 @@ The important design decision is that automation is **evidence-aware**. The appl
 
 ## Pipeline at a glance
 
-<img src="docs/pert-pipeline-map.svg" alt="Automated PERT analysis pipeline with review gate" width="100%">
+<img src="docs/pert-pipeline-light.svg" alt="PERT Analyzer evidence-first workflow" width="100%">
 
 ```text
 Image
@@ -219,6 +219,8 @@ The benchmark corpus and historical acceptance reports are kept in `docs/` and `
 
 The review flow is a safety boundary, not an error screen.
 
+<img src="docs/review-gate.svg" alt="PERT Analyzer confidence review gate" width="100%">
+
 ```text
 AUTO-DETECT
     ↓
@@ -263,6 +265,9 @@ A report should preserve enough context to answer:
 - What duration and critical path were calculated?
 - What issues remain unresolved?
 
+<details>
+<summary><strong>Open screenshots and UI evidence</strong></summary>
+
 ## Screenshots and evidence
 
 ### Analysis workspace
@@ -279,9 +284,11 @@ A report should preserve enough context to answer:
 
 More UI evidence, phase reports, benchmark outputs, and acceptance artifacts are available in [`docs/`](docs/).
 
+</details>
+
 ## Architecture
 
-<img src="docs/pert-pipeline-map.svg" alt="PERT Analyzer pipeline architecture" width="100%">
+<img src="docs/pert-pipeline-light.svg" alt="PERT Analyzer layered workflow" width="100%">
 
 The implementation is organized into layers:
 
