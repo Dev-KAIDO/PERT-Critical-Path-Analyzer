@@ -923,10 +923,11 @@ class MainWindow(QMainWindow):
         if graph is None:
             self.statusBar().showMessage("No graph available for PERT")
             return
-        estimates = getattr(self._session, "pert_estimates", None) or None
         try:
             from pert_analyzer.analysis.pert_engine import PertEngine
+            from pert_analyzer.gui.results.data import effective_pert_estimates
 
+            estimates = effective_pert_estimates(self._session)
             engine = PertEngine()
             result = engine.analyze(graph, estimates)
         except Exception as exc:
