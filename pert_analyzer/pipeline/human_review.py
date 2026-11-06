@@ -1620,6 +1620,9 @@ def build_review_session(
             activity_id=act.activity_id,
             current_duration=duration,
             duration_status=DurationStatus.REVIEW_REQUIRED,
+            # A16-A: surface the measured OCR confidence instead of the
+            # default 0.0, so the review center shows a real trust signal.
+            confidence=duration_confidence,
             evidence=[
                 ReviewEvidence(
                     source=e.source_phase,
