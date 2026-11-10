@@ -231,12 +231,11 @@ class TestStageResults:
         assert durations["Q"] == 3.0
         assert durations["V"] == 1.0
 
-    def test_pert_not_available(self, candidate, workflow) -> None:
+    def test_pert_derived_estimates(self, candidate, workflow) -> None:
         from pert_analyzer.analysis.pert_engine import PertStatus
         from pert_analyzer.gui.results.data import (
-            PERT_NO_DATA_HINT,
-            PERT_NO_DATA_TITLE,
             extract_pert,
+            pert_estimates_source,
         )
         from pert_analyzer.gui.session import GuiSession
 
@@ -246,9 +245,14 @@ class TestStageResults:
         session.complete_apply(candidate)
 
         pert = extract_pert(session)
-        assert pert.status == PertStatus.NO_PERT_DATA
-        assert pert.rows == []
-        assert PERT_NO_DATA_TITLE.startswith("PERT estimates are not available")
+        assert pert.status == PertStatus.PERT_READY
+        assert len(pert.rows) == 22  # derived prefill; PERT not run yet
+        assert pert.estimates_source == "derived"
+        assert pert_estimates_source(session) == "derived"
+        row = next(r for r in pert.rows if r.activity_id == "N")
+        assert row.most_likely == pytest.approx(8.0, abs=1e-9)
+        assert row.optimistic <= row.most_likely <= row.pessimistic
+        assert row.expected_time is None  # analysis columns stay empty
 
 
 # ---------------------------------------------------------------------------
@@ -257,8 +261,8 @@ class TestStageResults:
 
 
 class TestStageExport:
-    @classmethod
     @pytest.fixture(scope="class")
+    @classmethod
     def gui_report(cls, candidate, workflow, tmp_path_factory) -> None:
         from pert_analyzer.gui.session import GuiSession
 

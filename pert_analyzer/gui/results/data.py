@@ -295,6 +295,124 @@ PERT_NO_DATA_HINT = (
     "This project currently uses deterministic activity durations. "
     "Add three-point estimates in the table below, then run PERT."
 )
+# A-14: the derivation speaks for itself next to the ready status
+PERT_DERIVED_HINT = (
+    "Three-point estimates were derived automatically: most likely = accepted "
+    "duration; the spread comes from the OCR duration candidates, or a default "
+    "+/-25% band around it. Edit any value in the table below, re-run PERT."
+)
+
+
+# ---------------------------------------------------------------------------
+# Derived three-point estimates (A-14)
+#
+# When no estimate exists anywhere (no manual table entries and no O/M/P
+# fields on the activities) the accepted durations still support PERT:
+# the accepted duration becomes the most-likely value and the spread is
+# taken from the duration review candidates, defaulting to +/-25%.
+# ---------------------------------------------------------------------------
+
+_DERIVED_DEFAULT_BAND = 0.25
+
+
+def _graph_carries_omp(graph: Any) -> bool:
+    """True when at least one activity carries explicit O/M/P fields."""
+    for act in (getattr(graph, "activities", None) or {}).values():
+        if (
+            getattr(act, "optimistic_time", None) is not None
+            or getattr(act, "most_likely_time", None) is not None
+            or getattr(act, "pessimistic_time", None) is not None
+        ):
+            return True
+    return False
+
+
+def _duration_reviews(session: Any) -> List[Any]:
+    """Duration review items reachable from ``session`` (getattr only)."""
+    review = getattr(session, "review_session", None)
+    items = getattr(review, "durations", None) or []
+    return list(items)
+
+
+def duration_item_candidates(item: Any) -> List[float]:
+    """Distinct positive durations mentioned by one review item.
+
+    Mirrors the review detail panel: the current/proposed durations plus
+    every number found in the evidence descriptions.
+    """
+    raws: List[Any] = [
+        getattr(item, "current_duration", None),
+        getattr(item, "proposed_duration", None),
+    ]
+    for ev in getattr(item, "evidence", None) or []:
+        desc = getattr(ev, "description", "") or ""
+        raws.extend(desc.replace(",", " ").split())
+    values: List[float] = []
+    for raw in raws:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and not (value != value):
+            values.append(value)
+    distinct: List[float] = []
+    for value in values:
+        if not any(abs(value - seen) < 1e-9 for seen in distinct):
+            distinct.append(value)
+    return distinct
+
+
+def _activity_node_id(act: Any) -> Optional[str]:
+    """The geometric node id baked into an activity's metadata, or None."""
+    metadata = getattr(act, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    node = metadata.get("geometric_node_id")
+    return node if node else None
+
+
+def derived_pert_estimates(session: Any) -> Dict[str, PertEstimate]:
+    """Derive a three-point estimate from every accepted duration.
+
+    The accepted duration is the most-likely value ``m``. When the matching
+    duration review mentions two or more distinct candidates, the extremes
+    become optimistic/pessimistic, clamped to respect O <= M <= P; with
+    fewer candidates a symmetric +/-25% band is used, for which the PERT
+    expected time equals ``m`` exactly. Review items are matched by the
+    activity's geometric node id, falling back to the activity id.
+    """
+    graph = getattr(session, "graph_model", None)
+    if graph is None:
+        return {}
+    by_node: Dict[str, Any] = {}
+    by_aid: Dict[str, Any] = {}
+    for item in _duration_reviews(session):
+        node = getattr(item, "geometric_node_id", None)
+        if node and node not in by_node:
+            by_node[node] = item
+        aid = getattr(item, "activity_id", None)
+        if aid and aid not in by_aid:
+            by_aid[aid] = item
+    out: Dict[str, PertEstimate] = {}
+    for aid, act in (getattr(graph, "activities", None) or {}).items():
+        duration = getattr(act, "duration", None)
+        if duration is None:
+            continue
+        m = float(duration)
+        if m == 0.0:
+            # Dummy activities: the accepted zero stays exactly zero.
+            out[aid] = PertEstimate(0.0, 0.0, 0.0)
+            continue
+        item = by_node.get(_activity_node_id(act)) or by_aid.get(aid)
+        candidates = duration_item_candidates(item) if item is not None else []
+        if len(candidates) >= 2:
+            a = min(min(candidates), m)
+            p = max(max(candidates), m)
+        else:
+            a = m * (1.0 - _DERIVED_DEFAULT_BAND)
+            p = m * (1.0 + _DERIVED_DEFAULT_BAND)
+        out[aid] = PertEstimate(a, m, p)
+    return out
 
 
 @dataclass(frozen=True)
@@ -325,16 +443,74 @@ class PertData:
     project_std_dev: Optional[float] = None
     critical_paths: List[List[str]] = field(default_factory=list)
     critical_activity_count: int = 0
+    estimates_source: str = ""  # "manual" / "graph" / "derived" / ""
+
+
+def _graph_full_omp(graph: Any) -> bool:
+    """True when every activity carries a complete O/M/P field set."""
+    activities = getattr(graph, "activities", None) or {}
+    if not activities:
+        return False
+    for act in activities.values():
+        if (
+            getattr(act, "optimistic_time", None) is None
+            or getattr(act, "most_likely_time", None) is None
+            or getattr(act, "pessimistic_time", None) is None
+        ):
+            return False
+    return True
 
 
 def effective_pert_estimates(session: Any) -> Optional[Dict[str, PertEstimate]]:
     """The source of estimates for an analysis.
 
-    Manual entries on the session win; otherwise ``None`` tells the engine
-    to read the O/M/P fields carried by the GraphModel activities.
+    Precedence: manual entries on the session win; otherwise: when the
+    graph carries a complete O/M/P set, ``None`` lets the engine read the
+    fields directly; when fields are partial (A-15 corrections), the
+    O/M/P values win per field and derived_pert_estimates fills the
+    rest; with no fields at all the derived mapping is returned as is.
     """
     manual = getattr(session, "pert_estimates", None) or {}
-    return manual if manual else None
+    if manual:
+        return manual
+    graph = getattr(session, "graph_model", None)
+    activities = getattr(graph, "activities", None) or {} if graph else {}
+    if not activities:
+        return None
+    derived = derived_pert_estimates(session)
+    if not derived:
+        return None
+    if _graph_full_omp(graph):
+        return None
+    if not _graph_carries_omp(graph):
+        return derived
+    merged: Dict[str, PertEstimate] = {}
+    for aid, est in derived.items():
+        act = activities.get(aid)
+        if act is None:
+            merged[aid] = est
+            continue
+        o = getattr(act, "optimistic_time", None)
+        m = getattr(act, "most_likely_time", None)
+        p = getattr(act, "pessimistic_time", None)
+        merged[aid] = PertEstimate(
+            optimistic=o if o is not None else est.optimistic,
+            most_likely=m if m is not None else est.most_likely,
+            pessimistic=p if p is not None else est.pessimistic,
+        )
+    return merged
+
+
+def pert_estimates_source(session: Any) -> str:
+    """Which estimate supply wins: "manual", "graph", "derived" or ""."""
+    manual = getattr(session, "pert_estimates", None) or {}
+    if manual:
+        return "manual"
+    if _graph_carries_omp(getattr(session, "graph_model", None)):
+        return "graph"
+    if derived_pert_estimates(session):
+        return "derived"
+    return ""
 
 
 def extract_pert(session: Any) -> PertData:
@@ -386,4 +562,5 @@ def extract_pert(session: Any) -> PertData:
         critical_activity_count=_int_or_none(
             getattr(result, "critical_activity_count", 0) or 0
         ),
+        estimates_source=pert_estimates_source(session),
     )

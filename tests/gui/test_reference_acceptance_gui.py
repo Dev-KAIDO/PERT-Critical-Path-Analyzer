@@ -8,7 +8,7 @@ dashboard presents the authoritative numbers:
     22 activities / 28 dependencies / 54.0 days / 16 critical paths.
 
 The user must never see an Analysis ERROR for this recoverable image; the
-PERT tab must show the not-available message (no O/M/P estimates exist).
+PERT tab must show the auto-derived three-point estimates (A-14).
 """
 
 from __future__ import annotations
@@ -19,10 +19,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from pert_analyzer.gui.pages.results_page import ResultsPage
-from pert_analyzer.gui.results.data import (
-    PERT_NO_DATA_HINT,
-    PERT_NO_DATA_TITLE,
-)
+from pert_analyzer.gui.results.data import PERT_DERIVED_HINT
 from pert_analyzer.gui.session import AppState, GuiSession, ValidationCenterStatus
 from pert_analyzer.pipeline.review_api import ReviewWorkflow
 from tests.helpers.reference_gold import (
@@ -148,15 +145,23 @@ def test_dashboard_views_contain_real_data(
     assert path_list._count_label.text() == "Critical paths: 16"
 
 
-def test_pert_tab_shows_not_available(page: ResultsPage, workflow, candidate) -> None:
+def test_pert_tab_shows_derived_estimates(page: ResultsPage, workflow, candidate) -> None:
     session = GuiSession()
     session.current_image_path = str(REFERENCE_AON)
     session.workflow = workflow
     session.complete_apply(candidate)
     page.refresh(session)
 
-    status_text = page.pert().status_label().text()
-    assert PERT_NO_DATA_TITLE in status_text
-    assert PERT_NO_DATA_HINT in status_text
-    assert page.pert().run_button().isEnabled() is False
-    assert page.pert().results_table().rowCount() == 0
+    tab = page.pert()
+    status_text = tab.status_label().text()
+    assert "ready" in status_text
+    assert PERT_DERIVED_HINT in status_text
+    assert tab.run_button().isEnabled() is True
+    assert tab.results_table().rowCount() == 0
+    # Derived three-point estimates show up in the editable table.
+    table = tab.estimates_table()
+    assert table.rowCount() == 22
+    row = next(
+        r for r in range(table.rowCount()) if table.item(r, 0).text() == "N"
+    )
+    assert float(table.item(row, 2).text()) == pytest.approx(8.0, abs=1e-9)

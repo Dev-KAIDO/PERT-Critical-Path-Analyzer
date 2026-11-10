@@ -696,3 +696,100 @@ class TestReviewWorkflow:
 
         summary = workflow.summary()
         assert summary["cpm_eligibility"] == "RUNNABLE"
+
+
+# =============================================================================
+# A-15: corrected three-point estimates (O/M/P) on duration decisions
+# =============================================================================
+
+
+class TestDurationThreePointDecision:
+    def test_correct_stores_extremes_and_validates_order(self) -> None:
+        recon = make_recon(activities=[{"id": "X1", "node": "n_x", "duration": 0}])
+        session = make_session(recon)
+        add_duration_review(session, "n_x", 0.0)
+
+        session.decide_duration(
+            "n_x", "CORRECT", corrected_duration=8.0,
+            corrected_optimistic=5.0, corrected_pessimistic=10.0,
+        )
+        item = session.get_duration_review("n_x")
+        assert item.corrected_duration == 8.0
+        assert item.corrected_optimistic == 5.0
+        assert item.corrected_pessimistic == 10.0
+
+    def test_correct_rejects_optimistic_above_duration(self) -> None:
+        recon = make_recon(activities=[{"id": "X1", "node": "n_x", "duration": 0}])
+        session = make_session(recon)
+        add_duration_review(session, "n_x", 0.0)
+
+        with pytest.raises(ValueError, match="O must be <= M"):
+            session.decide_duration(
+                "n_x", "CORRECT", corrected_duration=8.0,
+                corrected_optimistic=9.0,
+            )
+
+    def test_correct_rejects_pessimistic_below_duration(self) -> None:
+        recon = make_recon(activities=[{"id": "X1", "node": "n_x", "duration": 0}])
+        session = make_session(recon)
+        add_duration_review(session, "n_x", 0.0)
+
+        with pytest.raises(ValueError, match="P must be >= M"):
+            session.decide_duration(
+                "n_x", "CORRECT", corrected_duration=8.0,
+                corrected_pessimistic=7.0,
+            )
+
+    def test_correct_rejects_negative_extreme(self) -> None:
+        recon = make_recon(activities=[{"id": "X1", "node": "n_x", "duration": 0}])
+        session = make_session(recon)
+        add_duration_review(session, "n_x", 0.0)
+
+        with pytest.raises(ValueError, match="non-negative"):
+            session.decide_duration(
+                "n_x", "CORRECT", corrected_duration=8.0,
+                corrected_optimistic=-1.0,
+            )
+
+    def test_roundtrip_persists_extremes(self) -> None:
+        recon = make_recon(activities=[{"id": "X1", "node": "n_x", "duration": 0}])
+        session = make_session(recon)
+        add_duration_review(session, "n_x", 0.0)
+        session.decide_duration(
+            "n_x", "CORRECT", corrected_duration=4.0,
+            corrected_optimistic=3.0, corrected_pessimistic=6.0,
+        )
+
+        restored = ReviewSession.from_dict(session.to_dict(), reconstruction=recon)
+        restored_item = restored.get_duration_review("n_x")
+        assert restored_item.corrected_duration == 4.0
+        assert restored_item.corrected_optimistic == 3.0
+        assert restored_item.corrected_pessimistic == 6.0
+
+    def test_apply_writes_extremes_onto_graph_activity(self) -> None:
+        recon = make_recon(
+            activities=[
+                {"id": "X1", "node": "n_x", "duration": 0},
+                {"id": "B", "node": "n_b", "duration": 2},
+            ],
+            dependencies=[{"source": "X1", "target": "B"}],
+        )
+        session = make_session(recon)
+        add_duration_review(session, "n_x", 0.0)
+        session.decide_duration(
+            "n_x", "CORRECT", corrected_duration=8.0,
+            corrected_optimistic=5.0, corrected_pessimistic=10.0,
+        )
+
+        candidate = apply_review_decisions(recon, session)
+        graph = candidate.graph
+        corrected_act = graph.activities["X1"]
+        assert corrected_act.duration == 8.0
+        assert corrected_act.optimistic_time == 5.0
+        assert corrected_act.most_likely_time == 8.0
+        assert corrected_act.pessimistic_time == 10.0
+        # The other activity keeps no O/M/P fields (derivation fills them).
+        other = graph.activities["B"]
+        assert other.duration == 2.0
+        assert other.optimistic_time is None
+        assert other.pessimistic_time is None

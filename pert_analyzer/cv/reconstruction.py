@@ -1208,6 +1208,9 @@ class ReconstructionEngine:
         label = ""
         duration = 0.0
         evidence_traces: List[EvidenceTrace] = []
+        best_numeric_score = -1.0
+        best_numeric_region: Optional[OCRTextRegion] = None
+        best_numeric_value: Optional[float] = None
 
         for assoc in association_result.associations:
             if (assoc.target_type == AssociationTargetType.NODE
@@ -1226,14 +1229,14 @@ class ReconstructionEngine:
                         ))
                     elif region.text_type == TextType.NUMERIC_CANDIDATE:
                         num_val = self._parse_numeric(region.normalized_text)
-                        if num_val is not None:
-                            duration = num_val
-                            evidence_traces.append(EvidenceTrace(
-                                source_phase="ocr_association",
-                                source_ids=[region.region_id],
-                                confidence_contribution=assoc.association_score,
-                                description=f"Duration text: '{region.raw_text}' -> {num_val}",
-                            ))
+                        # Highest association score wins, not the last
+                        # region processed (the list is score-sorted
+                        # descending, so "last wins" picked the WORST
+                        # candidate when a node has several numbers).
+                        if num_val is not None and assoc.association_score > best_numeric_score:
+                            best_numeric_score = assoc.association_score
+                            best_numeric_region = region
+                            best_numeric_value = num_val
                     elif region.text_type == TextType.TEXT_LABEL_CANDIDATE:
                         if not label:
                             label = region.raw_text
@@ -1243,6 +1246,15 @@ class ReconstructionEngine:
                             confidence_contribution=assoc.association_score,
                             description=f"Label text: '{region.raw_text}'",
                         ))
+
+        if best_numeric_value is not None and best_numeric_region is not None:
+            duration = best_numeric_value
+            evidence_traces.append(EvidenceTrace(
+                source_phase="ocr_association",
+                source_ids=[best_numeric_region.region_id],
+                confidence_contribution=best_numeric_score,
+                description=f"Duration text: '{best_numeric_region.raw_text}' -> {duration}",
+            ))
 
         return region_ids, label, duration, evidence_traces
 
@@ -1262,6 +1274,9 @@ class ReconstructionEngine:
         label = ""
         duration = 0.0
         evidence_traces: List[EvidenceTrace] = []
+        best_numeric_score = -1.0
+        best_numeric_region: Optional[OCRTextRegion] = None
+        best_numeric_value: Optional[float] = None
 
         for assoc in association_result.associations:
             if (assoc.target_type == AssociationTargetType.ARROW
@@ -1273,14 +1288,12 @@ class ReconstructionEngine:
 
                     if region.text_type == TextType.NUMERIC_CANDIDATE:
                         num_val = self._parse_numeric(region.normalized_text)
-                        if num_val is not None:
-                            duration = num_val
-                            evidence_traces.append(EvidenceTrace(
-                                source_phase="ocr_association",
-                                source_ids=[region.region_id],
-                                confidence_contribution=assoc.association_score,
-                                description=f"Duration text: '{region.raw_text}' -> {num_val}",
-                            ))
+                        # Highest association score wins, not the last
+                        # region processed (see _find_text_for_shape).
+                        if num_val is not None and assoc.association_score > best_numeric_score:
+                            best_numeric_score = assoc.association_score
+                            best_numeric_region = region
+                            best_numeric_value = num_val
                     else:
                         if not label:
                             label = region.raw_text
@@ -1290,6 +1303,15 @@ class ReconstructionEngine:
                             confidence_contribution=assoc.association_score,
                             description=f"Label text: '{region.raw_text}'",
                         ))
+
+        if best_numeric_value is not None and best_numeric_region is not None:
+            duration = best_numeric_value
+            evidence_traces.append(EvidenceTrace(
+                source_phase="ocr_association",
+                source_ids=[best_numeric_region.region_id],
+                confidence_contribution=best_numeric_score,
+                description=f"Duration text: '{best_numeric_region.raw_text}' -> {duration}",
+            ))
 
         return region_ids, label, duration, evidence_traces
 

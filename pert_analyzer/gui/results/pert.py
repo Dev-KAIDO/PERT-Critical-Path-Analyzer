@@ -29,8 +29,10 @@ from PySide6.QtWidgets import (
 
 from pert_analyzer.analysis.pert_engine import PertEstimate, PertStatus
 from pert_analyzer.gui.results.data import (
+    PERT_DERIVED_HINT,
     PERT_NO_DATA_HINT,
     PERT_NO_DATA_TITLE,
+    derived_pert_estimates,
     extract_pert,
 )
 from pert_analyzer.gui.results.formatting import format_duration, format_number
@@ -293,6 +295,7 @@ class PertTab(QWidget):
         graph = getattr(session, "graph_model", None) if session else None
         self._graph = graph
         session_estimates = getattr(session, "pert_estimates", None) or {}
+        derived = derived_pert_estimates(session) if session else {}
         ids = sorted(graph.activities) if graph is not None else []
 
         self._rows = ids
@@ -300,7 +303,9 @@ class PertTab(QWidget):
         self._estimates_table.setRowCount(0)
         self._estimates_table.setRowCount(len(ids))
         for row, aid in enumerate(ids):
-            o, m, p = self._values_for(aid, graph, session_estimates)
+            o, m, p = self._values_for(
+                aid, graph, session_estimates, derived
+            )
             self._draft[aid] = [o, m, p]
             id_item = QTableWidgetItem(aid)
             flags = id_item.flags() & ~Qt.ItemFlag.ItemIsEditable
@@ -316,18 +321,26 @@ class PertTab(QWidget):
         aid: str,
         graph: Any,
         session_estimates: Dict[str, PertEstimate],
+        derived: Dict[str, PertEstimate],
     ) -> tuple:
+        """Fallback chain: manual entries, graph fields, derived values."""
         est = session_estimates.get(aid)
         if est is not None:
             return est.optimistic, est.most_likely, est.pessimistic
         if graph is None:
             return None, None, None
         act = graph.activities.get(aid)
-        return (
+        values = (
             getattr(act, "optimistic_time", None),
             getattr(act, "most_likely_time", None),
             getattr(act, "pessimistic_time", None),
         )
+        if any(value is not None for value in values):
+            return values
+        est = derived.get(aid)
+        if est is not None:
+            return est.optimistic, est.most_likely, est.pessimistic
+        return values
 
     # ------------------------------------------------------------------
     # Estimate editing
@@ -382,26 +395,32 @@ class PertTab(QWidget):
         data = extract_pert(session)
         self._data = data
         session.pert_status = data.status
-        self._render_status(data.status)
+        self._render_status(data)
         ready = data.status == PertStatus.PERT_READY
         self._run_btn.setEnabled(ready and not self._busy)
         self._render_results()
 
-    def _render_status(self, status: PertStatus) -> None:
+    def _render_status(self, data: Any) -> None:
+        """Status banner; READY gains the derivation hint when derived."""
         text = {
             PertStatus.NO_PERT_DATA: PERT_NO_DATA_TITLE,
             PertStatus.PERT_REVIEW_REQUIRED: REVIEW_REQUIRED_TEXT,
             PertStatus.PERT_INVALID: INVALID_TEXT,
             PertStatus.PERT_READY: READY_TEXT,
-        }[status]
-        if status == PertStatus.NO_PERT_DATA:
+        }[data.status]
+        if data.status == PertStatus.NO_PERT_DATA:
             text = f"{text}\n{PERT_NO_DATA_HINT}"
+        elif (
+            data.status == PertStatus.PERT_READY
+            and getattr(data, "estimates_source", "") == "derived"
+        ):
+            text = f"{text}\n{PERT_DERIVED_HINT}"
         color = {
             PertStatus.NO_PERT_DATA: TEXT_MUTED,
             PertStatus.PERT_REVIEW_REQUIRED: WARNING,
             PertStatus.PERT_INVALID: DANGER,
             PertStatus.PERT_READY: SUCCESS,
-        }[status]
+        }[data.status]
         self._status_label.setText(text)
         self._status_label.setStyleSheet(f"color: {color};")
 

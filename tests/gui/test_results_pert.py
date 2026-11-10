@@ -11,6 +11,8 @@ Covers:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QTableWidgetItem
@@ -18,9 +20,13 @@ from PySide6.QtWidgets import QApplication, QTableWidgetItem
 from pert_analyzer.analysis.pert_engine import PertStatus
 from pert_analyzer.gui.pages.results_page import ResultsPage
 from pert_analyzer.gui.results.data import (
+    PERT_DERIVED_HINT,
     PERT_NO_DATA_HINT,
     PERT_NO_DATA_TITLE,
+    derived_pert_estimates,
+    effective_pert_estimates,
     extract_pert,
+    pert_estimates_source,
 )
 from pert_analyzer.gui.results.formatting import format_duration, format_number
 from pert_analyzer.gui.results.network import NetworkTab
@@ -57,7 +63,7 @@ def page(qapp: QApplication) -> ResultsPage:
 
 
 def _make_session_no_estimates() -> GuiSession:
-    """Graph activity with no O/M/P fields → NO_PERT_DATA."""
+    """Durations with no O/M/P fields → reachable via derived estimates."""
     graph = make_fake_graph(
         activities={
             "A0": FakeGraphActivity("A0", 7.0, "Start"),
@@ -65,6 +71,25 @@ def _make_session_no_estimates() -> GuiSession:
         },
         dependencies=[FakeGraphDependency("E0", "A0", "A1")],
     )
+    candidate = FakeReviewedCandidate(valid=True, graph=graph, cpm=_UNSET)
+    session = GuiSession()
+    session.workflow = FakeValidatedWorkflow(
+        candidate=candidate, review_session=FakeReviewSession(),
+    )
+    session.complete_apply(candidate)
+    return session
+
+
+def _make_session_no_durations() -> GuiSession:
+    """Activities without any duration or O/M/P field → NO_PERT_DATA."""
+    activities = {
+        aid: SimpleNamespace(
+            id=aid, activity_id=aid, duration=None, name=aid,
+            optimistic_time=None, most_likely_time=None, pessimistic_time=None,
+        )
+        for aid in ("A0", "A1")
+    }
+    graph = make_fake_graph(activities=activities, dependencies=[])
     candidate = FakeReviewedCandidate(valid=True, graph=graph, cpm=_UNSET)
     session = GuiSession()
     session.workflow = FakeValidatedWorkflow(
@@ -85,14 +110,97 @@ def _ready_page(page: ResultsPage) -> tuple[ResultsPage, GuiSession]:
 # ---------------------------------------------------------------------------
 
 
-def test_no_pert_data_state_messages(page: ResultsPage) -> None:
+def test_derived_state_messages(page: ResultsPage) -> None:
+    """Durations without O/M/P derive a READY three-point set (A-14)."""
     session = _make_session_no_estimates()
+    page.refresh(session)
+    tab = page.pert()
+    text = tab.status_label().text()
+    assert "ready" in text
+    assert PERT_DERIVED_HINT in text
+    assert tab.run_button().isEnabled()
+    assert tab.data.estimates_source == "derived"
+    # The editor prefills derived values; touching a cell adopts them.
+    table = tab.estimates_table()
+    assert table.rowCount() == 2
+    assert table.item(0, 2).text() == format_number(7.0)
+
+
+def test_no_pert_data_state_messages(page: ResultsPage) -> None:
+    """Without any duration there is nothing to derive -> NO_PERT_DATA."""
+    session = _make_session_no_durations()
     page.refresh(session)
     tab = page.pert()
     text = tab.status_label().text()
     assert PERT_NO_DATA_TITLE in text
     assert PERT_NO_DATA_HINT in text
     assert not tab.run_button().isEnabled()
+
+
+def test_manual_estimates_win_over_derivation(page: ResultsPage) -> None:
+    session = _make_session_no_estimates()
+    estimates = {
+        "A0": PertEstimate(1.0, 2.0, 3.0),
+        "A1": PertEstimate(4.0, 5.0, 6.0),
+    }
+    session.pert_estimates = estimates
+    assert effective_pert_estimates(session) is estimates
+    assert pert_estimates_source(session) == "manual"
+
+
+def test_graph_fields_win_over_derivation(page: ResultsPage) -> None:
+    session = make_pert_fixture_session()
+    assert effective_pert_estimates(session) is None
+    assert pert_estimates_source(session) == "graph"
+
+
+def test_derived_spread_from_review_candidates() -> None:
+    """>= 2 distinct candidates -> extremes, clamped to O <= M <= P."""
+    graph = SimpleNamespace(
+        activities={
+            "A1": SimpleNamespace(
+                id="A1", activity_id="A1", duration=3.0,
+                metadata={"geometric_node_id": "n1"},
+            ),
+            "A2": SimpleNamespace(
+                id="A2", activity_id="A2", duration=4.0,
+                metadata={"geometric_node_id": "n2"},
+            ),
+            "A3": SimpleNamespace(
+                id="A3", activity_id="A3", duration=0.0, metadata={},
+            ),
+            "A4": SimpleNamespace(
+                id="A4", activity_id="A4", duration=None, metadata=None,
+            ),
+        },
+        dependencies=[],
+    )
+    reviews = [
+        SimpleNamespace(
+            geometric_node_id="n1", activity_id=None,
+            current_duration=3.0, proposed_duration=None,
+            evidence=[
+                SimpleNamespace(description="cost label reads '2 days': 2"),
+                SimpleNamespace(description="see the '7 days' cell too: 7"),
+            ],
+        ),
+        SimpleNamespace(
+            geometric_node_id="n2", activity_id="A2",
+            current_duration=4.0, proposed_duration=9.0, evidence=[],
+        ),
+    ]
+    session = SimpleNamespace(
+        graph_model=graph,
+        review_session=SimpleNamespace(durations=reviews),
+        pert_estimates={},
+    )
+
+    est = derived_pert_estimates(session)
+    assert est["A1"] == PertEstimate(2.0, 3.0, 7.0)
+    assert est["A2"] == PertEstimate(4.0, 4.0, 9.0)
+    assert est["A3"] == PertEstimate(0.0, 0.0, 0.0)
+    assert "A4" not in est
+    assert pert_estimates_source(session) == "derived"
 
 
 def test_pert_ready_state_enables_run_button(page: ResultsPage) -> None:
@@ -259,3 +367,30 @@ def test_network_toggle_renders_pert_expected_times(qapp: QApplication) -> None:
     network.set_metric_mode("CPM")
     assert network.node_items()["A0"].duration == 5.0
     assert network.node_items()["A0"].metric_label == "Duration"
+
+
+def test_partial_graph_fields_merge_with_derivation() -> None:
+    """A-15 corrections land as partial O/M/P fields: they win per field."""
+    graph = SimpleNamespace(
+        activities={
+            "A0": SimpleNamespace(
+                id="A0", activity_id="A0", duration=7.0,
+                optimistic_time=5.0, most_likely_time=7.0,
+                pessimistic_time=9.0,
+            ),
+            "A1": SimpleNamespace(
+                id="A1", activity_id="A1", duration=4.0,
+                optimistic_time=None, most_likely_time=None,
+                pessimistic_time=None,
+            ),
+        },
+        dependencies=[],
+    )
+    session = SimpleNamespace(
+        graph_model=graph, pert_estimates={}, review_session=None,
+    )
+
+    est = effective_pert_estimates(session)
+    assert est["A0"] == PertEstimate(5.0, 7.0, 9.0)
+    assert est["A1"] == PertEstimate(3.0, 4.0, 5.0)  # derived +/-25% band
+    assert pert_estimates_source(session) == "graph"

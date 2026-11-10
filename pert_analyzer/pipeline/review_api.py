@@ -588,6 +588,8 @@ class ReviewWorkflow:
         geometric_node_id: str,
         decision: str,
         corrected_duration: Optional[float] = None,
+        corrected_optimistic: Optional[float] = None,
+        corrected_pessimistic: Optional[float] = None,
         reason: str = "",
         comment: str = "",
     ) -> bool:
@@ -597,6 +599,8 @@ class ReviewWorkflow:
         ok, _ = self._session.decide_duration(
             geometric_node_id, decision,
             corrected_duration=corrected_duration,
+            corrected_optimistic=corrected_optimistic,
+            corrected_pessimistic=corrected_pessimistic,
             reason=reason, comment=comment, return_item=True,
         )
         return bool(ok)

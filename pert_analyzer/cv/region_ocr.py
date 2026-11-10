@@ -22,6 +22,7 @@ import numpy as np
 
 from pert_analyzer.core.models import BoundingBox, _generate_id
 from pert_analyzer.cv.models import CandidateNode, ShapeType
+from pert_analyzer.cv.numeric_extraction import NumericExtractor
 from pert_analyzer.cv.ocr_engine import OCREngineBase, OCREngineError
 from pert_analyzer.cv.ocr_models import OCRConfig, OCRTextRegion, OCRProcessingResult, TextType
 
@@ -204,6 +205,27 @@ class RegionOCRProcessor:
                 )
                 result.id_sub_crop_regions = id_regions
                 all_regions.extend(id_regions)
+
+            # 5. Duration sub-crop OCR (bottom-center region). The regions
+            #    stay node-local (numeric extraction only): the designed
+            #    pass was configured but never invoked, so digits read from
+            #    the ID area became phantom durations. Parsed values are
+            #    attached so the semantic resolver's sub-crop boost fires.
+            duration_crop = self._extract_sub_crop(crop, self.config, is_id=False)
+            if duration_crop is not None:
+                duration_regions = self._run_sub_crop_ocr(
+                    duration_crop,
+                    crop_bbox,
+                    "duration_sub",
+                    self.config.duration_psm_modes,
+                )
+                result.duration_sub_crop_regions = duration_regions
+                numeric_extractor = NumericExtractor()
+                for region in duration_regions:
+                    parsed = numeric_extractor.extract_from_region(region)
+                    if parsed:
+                        region.is_numeric = True
+                        region.parsed_value = parsed[0].value
 
             # 6. Deduplicate and rank results
             result.regions = self._deduplicate_regions(all_regions)
@@ -525,7 +547,6 @@ class RegionOCRProcessor:
 
     def _extract_numeric_candidates(self, result: NodeOCRResult) -> None:
         """Extract numeric candidates from OCR regions using NumericExtractor."""
-        from pert_analyzer.cv.numeric_extraction import NumericExtractor
         extractor = NumericExtractor()
 
         # Extract from all regions (full-node + sub-crop)
