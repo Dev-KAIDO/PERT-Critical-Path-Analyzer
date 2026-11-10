@@ -28,6 +28,13 @@ def _cell(value: Any) -> str:
     return str(value)
 
 
+def _fmt_float(value: Any) -> str:
+    """Display helper for float metrics; keeps computation callers raw."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{float(value):.4f}".rstrip("0").rstrip(".") or "0"
+    return _cell(value)
+
+
 def _metric(entry: Dict[str, Any], key: str) -> Any:
     return ((entry.get("stage_metrics") or {}).get(key))
 
@@ -424,6 +431,7 @@ def build_markdown(summary: Dict[str, Any]) -> str:
     out.append("")
     _write_summary_table(out, images)
     out.append("")
+    _write_cpm_compare_section(out, images)
     _write_accuracy_section(out, images)
     out.append("### Detail")
     out.append("")
@@ -431,10 +439,64 @@ def build_markdown(summary: Dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def _write_cpm_compare_section(out: List[str], images: List[Dict[str, Any]]) -> None:
+    """Measured (pipeline CPM) vs derived (GT graph CPM), one row per image."""
+    rows = []
+    for entry in images:
+        extra = entry.get("extra") or {}
+        block = extra.get("cpm_vs_gt")
+        if not block:
+            continue
+        expected = block.get("expected") or {}
+        if expected.get("available"):
+            rows.append(
+                [
+                    f"`{(entry.get('relative_path') or '?')}`",
+                    "yes",
+                    _fmt_float(expected.get("project_duration")),
+                    _fmt_float(block.get("detected_project_duration")),
+                    _fmt_float(block.get("project_duration_delta")),
+                    _cell(expected.get("critical_path_count")),
+                    _cell(block.get("detected_critical_path_count")),
+                    _cell(block.get("critical_path_count_delta")),
+                    "-",
+                ]
+            )
+        else:
+            rows.append(
+                [
+                    f"`{(entry.get('relative_path') or '?')}`",
+                    "no",
+                    "-",
+                    _cell(block.get("detected_project_duration")),
+                    "-",
+                    "-",
+                    _cell(block.get("detected_critical_path_count")),
+                    "-",
+                    str(expected.get("reason") or "-"),
+                ]
+            )
+    if not rows:
+        return
+    out.append("### CPM vs ground truth (derived expectation)")
+    out.append("")
+    out.append("_Expectation is computed live by the production CPM engine on the")
+    out.append("annotated graph (AON images with complete durations). Deltas are")
+    out.append("``detected - expected``; empty detected cells mean CPM did not run")
+    out.append("(invalid pipeline graph). AOA is reported honestly as unsupported._")
+    out.append("")
+    out.append("| Image | Expected | Exp.duration | Det.duration | Delta | Exp.paths | Det.paths | Delta paths | Note |")
+    out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for row in rows:
+        out.append("| " + " | ".join(row) + " |")
+    out.append("")
+
+
 def write_reports(
     summary: Dict[str, Any],
     md_path: str | Path,
     json_path: str | Path,
+    debug: bool = False,
 ) -> None:
     md = Path(md_path)
     jf = Path(json_path)
@@ -444,3 +506,94 @@ def write_reports(
     jf.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    if debug:
+        _write_debug_reports(summary, md, jf)
+
+
+def _write_debug_reports(
+    summary: Dict[str, Any],
+    md_path: Path,
+    json_path: Path,
+) -> None:
+    """Emit the optional per-image debug digest files (Batch E ``--debug``)."""
+    images = summary.get("images") or []
+    debug_entries = [
+        entry for entry in images if (entry.get("extra") or {}).get("debug")
+    ]
+    if not debug_entries:
+        return
+    debug_md = md_path.with_suffix(".debug.md")
+    debug_json = json_path.with_suffix(".debug.json")
+    debug_md.write_text(_build_debug_markdown(debug_entries), encoding="utf-8")
+    debug_json.write_text(
+        json.dumps(
+            {"schema_version": "debug-1", "images": debug_entries},
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _build_debug_markdown(entries: List[Dict[str, Any]]) -> str:
+    out: List[str] = []
+    out.append("# Benchmark debug digest (--debug)")
+    out.append("")
+    out.append("_Read-only diagnostics: promotion-gate pass/fail aggregation for")
+    out.append("dependency review routing, plus Batch A duration sub-crop outreach")
+    out.append("counters. Nothing here changes pipeline behavior._")
+    out.append("")
+    for entry in entries:
+        out.append(f"## `{entry.get('relative_path') or '?'}`")
+        out.append("")
+        debug = (entry.get("extra") or {}).get("debug") or {}
+        digest = debug.get("gate_digest") or {}
+        if digest:
+            out.append("**Promotion-gate digest** (per-gate pass counts and")
+            out.append("first-failing-gate histogram across every evaluated")
+            out.append("dependency candidate):")
+            out.append("")
+            out.append("| Gate | Passed | Failed |")
+            out.append("| --- | --- | --- |")
+            for name, stats in (digest.get("per_gate") or {}).items():
+                out.append(
+                    f"| `{name}` | {stats.get('passed', 0)} "
+                    f"| {stats.get('failed', 0)} |"
+                )
+            out.append("")
+            out.append(
+                f"- candidates evaluated: **{digest.get('candidates_evaluated', 0)}**"
+                f" · all gates passed: **{digest.get('all_gates_passed', 0)}**"
+            )
+            blockers = digest.get("first_failing_gate") or {}
+            if blockers:
+                summary_text = ", ".join(
+                    f"`{name}`={count}" for name, count in blockers.items()
+                )
+                out.append(f"- first-failing-gate histogram: {summary_text}")
+            out.append("")
+        routing = debug.get("review_routing") or {}
+        if routing:
+            out.append("**Review routing counts:**")
+            out.append("")
+            out.append(
+                f"raw_arrows={routing.get('raw_arrows')} → "
+                f"deduplicated={routing.get('deduplicated_arrows')} → "
+                f"accepted={routing.get('accepted')} · review="
+                f"{routing.get('review')} · rejected={routing.get('rejected')}"
+                f" (self_loops={routing.get('self_loops')}, "
+                f"duplicate_edges={routing.get('duplicate_edges')})"
+            )
+            out.append("")
+        sub_crop = debug.get("duration_sub_crop") or {}
+        if sub_crop:
+            out.append("**Duration sub-crop outreach (Batch A pass):**")
+            out.append("")
+            out.append(
+                f"nodes with sub-crop regions: "
+                f"**{sub_crop.get('nodes_with_regions', 0)}** · "
+                f"attached numeric parses: "
+                f"**{sub_crop.get('attached_parses', 0)}**"
+            )
+            out.append("")
+    return "\n".join(out)

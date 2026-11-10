@@ -83,6 +83,10 @@ class DependencyValidationReport:
     rejected_candidates: List[ValidatedDependency] = field(default_factory=list)
     review_candidates: List[ValidatedDependency] = field(default_factory=list)
     debug_entries: List[Dict[str, Any]] = field(default_factory=list)
+    # Aggregated per-gate pass/fail counts over every evaluated candidate
+    # (diagnostics only; the decision logic itself lives in
+    # ValidatedDependencyBuilder._can_auto_accept_visual_review).
+    gate_digest: Dict[str, Any] = field(default_factory=dict)
 
 
 class ValidatedDependencyBuilder:
@@ -441,22 +445,41 @@ class ValidatedDependencyBuilder:
             min(1.0, 0.40 * shaft + 0.25 * continuity + 0.20 * boundary + 0.15 * arrowhead),
         )
 
+    # Promotion-lift thresholds for review candidates. Do not change these
+    # values silently: they are the measured six-gate conjunction that
+    # decides when a geometrically corroborated review candidate is
+    # promoted to an accepted dependency. Diagnostics (gate digest) read
+    # these same constants, so debug output can never contradict them.
+    PROMOTION_MIN_CONFIDENCE = 0.68
+    PROMOTION_MIN_VISUAL_ROUTE_SUPPORT = 0.58
+    PROMOTION_MIN_ARROWHEAD = 0.50
+    PROMOTION_MIN_BOUNDARY_INTERSECTION = 0.40
+    PROMOTION_MAX_CROSSING_PENALTY = 0.30
+    PROMOTION_MIN_DIRECTION_CONSISTENCY = 0.85
+    PROMOTION_MIN_ANGULAR_CONSISTENCY = 0.80
+
     @staticmethod
     def _can_auto_accept_visual_review(dep: ValidatedDependency) -> bool:
         """Require a high-quality visual conjunction before resolving review."""
         evidence = dep.evidence
         return (
-            float(dep.metadata.get("crossing_penalty", 0.0) or 0.0) < 0.30
+            float(dep.metadata.get("crossing_penalty", 0.0) or 0.0)
+            < ValidatedDependencyBuilder.PROMOTION_MAX_CROSSING_PENALTY
             and
-            dep.confidence_score >= 0.68
-            and evidence.visual_route_support >= 0.58
-            and evidence.arrowhead_confidence >= 0.50
+            dep.confidence_score >= ValidatedDependencyBuilder.PROMOTION_MIN_CONFIDENCE
+            and evidence.visual_route_support
+            >= ValidatedDependencyBuilder.PROMOTION_MIN_VISUAL_ROUTE_SUPPORT
+            and evidence.arrowhead_confidence
+            >= ValidatedDependencyBuilder.PROMOTION_MIN_ARROWHEAD
             and min(
                 evidence.source_boundary_intersection,
                 evidence.target_boundary_intersection,
-            ) >= 0.40
-            and evidence.direction_consistency >= 0.85
-            and evidence.angular_consistency >= 0.80
+            )
+            >= ValidatedDependencyBuilder.PROMOTION_MIN_BOUNDARY_INTERSECTION
+            and evidence.direction_consistency
+            >= ValidatedDependencyBuilder.PROMOTION_MIN_DIRECTION_CONSISTENCY
+            and evidence.angular_consistency
+            >= ValidatedDependencyBuilder.PROMOTION_MIN_ANGULAR_CONSISTENCY
         )
 
     def _get_strict_direction(
@@ -886,4 +909,90 @@ class ValidatedDependencyBuilder:
                     "visual_route_support": dep.evidence.visual_route_support,
                 },
             }
+            gates = self.evaluate_promotion_gates(dep)
+            if gates is not None:
+                entry["promotion_gates"] = gates
             report.debug_entries.append(entry)
+
+        report.gate_digest = self.compute_gate_digest(candidates)
+
+    @classmethod
+    def evaluate_promotion_gates(
+        cls, dep: ValidatedDependency
+    ) -> Dict[str, Any]:
+        """Return per-gate pass/fail values for one candidate.
+
+        Pure diagnostics: the same six values the promotion conjunction in
+        ``_can_auto_accept_visual_review`` inspects, compared against the
+        same class constants. Candidates built by this builder always
+        carry computed evidence, so this always evaluates (a paper-zero
+        evidence object simply fails every gate).
+        """
+        evidence = dep.evidence
+        crossing = float(dep.metadata.get("crossing_penalty", 0.0) or 0.0)
+        gate_values = {
+            "crossing_penalty": crossing,
+            "confidence": float(dep.confidence_score),
+            "visual_route_support": float(evidence.visual_route_support),
+            "arrowhead": float(evidence.arrowhead_confidence),
+            "boundary_min": float(min(
+                evidence.source_boundary_intersection or 0.0,
+                evidence.target_boundary_intersection or 0.0,
+            )),
+            "direction": float(evidence.direction_consistency),
+            "angular": float(evidence.angular_consistency),
+        }
+        thresholds = {
+            "crossing_penalty": ("<", cls.PROMOTION_MAX_CROSSING_PENALTY),
+            "confidence": (">=", cls.PROMOTION_MIN_CONFIDENCE),
+            "visual_route_support": (">=", cls.PROMOTION_MIN_VISUAL_ROUTE_SUPPORT),
+            "arrowhead": (">=", cls.PROMOTION_MIN_ARROWHEAD),
+            "boundary_min": (">=", cls.PROMOTION_MIN_BOUNDARY_INTERSECTION),
+            "direction": (">=", cls.PROMOTION_MIN_DIRECTION_CONSISTENCY),
+            "angular": (">=", cls.PROMOTION_MIN_ANGULAR_CONSISTENCY),
+        }
+        passed: Dict[str, bool] = {}
+        for name, value in gate_values.items():
+            op, threshold = thresholds[name]
+            passed[name] = (value < threshold) if op == "<" else (value >= threshold)
+        return {
+            "values": gate_values,
+            "passed": passed,
+            "all_passed": all(passed.values()),
+        }
+
+    @classmethod
+    def compute_gate_digest(
+        cls,
+        candidates: List[ValidatedDependency],
+    ) -> Dict[str, Any]:
+        """Aggregate per-gate pass counts and the first-failing-gate histogram."""
+        gates = [
+            cls.evaluate_promotion_gates(dep)
+            for dep in candidates
+        ]
+        gates = [g for g in gates if g is not None]
+        digest: Dict[str, Any] = {
+            "candidates_evaluated": len(gates),
+            "all_gates_passed": sum(1 for g in gates if g["all_passed"]),
+            "per_gate": {},
+            "first_failing_gate": {},
+        }
+        order = ["crossing_penalty", "confidence", "visual_route_support",
+                 "arrowhead", "boundary_min", "direction", "angular"]
+        for name in order:
+            digest["per_gate"][name] = {
+                "passed": sum(1 for g in gates if g["passed"][name]),
+                "failed": sum(1 for g in gates if not g["passed"][name]),
+            }
+        for g in gates:
+            if g["all_passed"]:
+                continue
+            blocker = next(
+                (name for name in order if not g["passed"][name]),
+                "unknown",
+            )
+            digest["first_failing_gate"][blocker] = (
+                digest["first_failing_gate"].get(blocker, 0) + 1
+            )
+        return digest

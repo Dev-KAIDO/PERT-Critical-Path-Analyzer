@@ -207,6 +207,57 @@ def _make_stage_logger(relative: str) -> Callable[[Any], None]:
     return _cb
 
 
+def _collect_debug_digest(
+    workflow: Any,
+    result: Any,
+    metrics: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Collect the per-image debug digest (Batch E ``--debug``).
+
+    Read-only aggregation of intermediates the pipeline already produced:
+    the dependency-promotion gate digest, review routing counts and the
+    OCR duration sub-crop attach counters from Batch A's wired pass.
+    Never raises outwards; all accessors are defensive.
+    """
+    digest: Dict[str, Any] = {}
+    recon = getattr(result, "_reconstruction", None)
+    report = (getattr(recon, "metadata", None) or {}).get(
+        "dependency_validation"
+    )
+    if report is not None:
+        digest["gate_digest"] = getattr(report, "gate_digest", None) or {}
+        digest["review_routing"] = {
+            "raw_arrows": _as_int(getattr(report, "raw_arrow_count", None)),
+            "deduplicated_arrows": _as_int(
+                getattr(report, "deduplicated_arrow_count", None)
+            ),
+            "accepted": _as_int(getattr(report, "accepted_count", None)),
+            "review": _as_int(getattr(report, "review_count", None)),
+            "rejected": _as_int(getattr(report, "rejected_count", None)),
+            "self_loops": _as_int(getattr(report, "self_loop_count", None)),
+            "duplicate_edges": _as_int(
+                getattr(report, "duplicate_edge_count", None)
+            ),
+        }
+    # Duration sub-crop outreach (Batch A pass wiring health): how many
+    # node-local numeric parses the new pass produced.
+    region_results = getattr(result, "_region_ocr_results", None) or []
+    nodes_with_duration_regions = 0
+    attached_parses = 0
+    for nr in region_results:
+        regions = getattr(nr, "duration_sub_crop_regions", None) or []
+        if regions:
+            nodes_with_duration_regions += 1
+        for region in regions:
+            if getattr(region, "parsed_value", None) is not None:
+                attached_parses += 1
+    digest["duration_sub_crop"] = {
+        "nodes_with_regions": nodes_with_duration_regions,
+        "attached_parses": attached_parses,
+    }
+    return digest
+
+
 def analyze_single(
     image_path: str | Path,
     dataset_root: str | Path | None = None,
@@ -214,6 +265,7 @@ def analyze_single(
     stage_callback: Any = None,
     load_gt: bool = True,
     ground_truth_dir: str | Path | None = None,
+    debug: bool = False,
 ) -> ImageRunResult:
     """Analyze one image with the real pipeline and measure everything.
 
@@ -368,6 +420,27 @@ def analyze_single(
                 )
             except Exception as exc:  # noqa: BLE001 - measurement must not abort
                 run.accuracy_metrics = {"available": False, "error": str(exc)}
+            # Derived CPM expectation (Batch E): computed live from the
+            # annotation's own graph; never fabricates values and appears
+            # on every report run (cheap, deterministic).
+            try:
+                from pert_analyzer.benchmark.cpm_compare import cpm_vs_gt_block
+
+                expected_block = cpm_vs_gt_block(
+                    annotation,
+                    metrics.get("cpm_project_duration"),
+                    metrics.get("critical_path_count"),
+                )
+                run.extra["cpm_vs_gt"] = expected_block
+            except Exception as exc:  # noqa: BLE001 - never abort on GT issues
+                run.extra["cpm_vs_gt"] = {"available": False, "error": str(exc)}
+            if debug:
+                try:
+                    run.extra["debug"] = _collect_debug_digest(
+                        workflow, result, metrics
+                    )
+                except Exception as exc:  # noqa: BLE001 - diagnostics only
+                    run.extra["debug"] = {"error": str(exc)}
     return run
 
 
@@ -394,6 +467,7 @@ def run_benchmark(
     ground_truth_dir: str | Path | None = None,
     limit: Optional[int] = None,
     progress_callback: Optional[Callable[[str, ImageRunResult], None]] = None,
+    debug: bool = False,
 ) -> Dict[str, Any]:
     """Run the real pipeline over every image in ``dataset_root``.
 
@@ -419,6 +493,7 @@ def run_benchmark(
             analyze_fn=analyze_fn,
             load_gt=load_gt,
             ground_truth_dir=ground_truth_dir,
+            debug=debug,
         )
         results.append(run.to_dict())
         logger.info(

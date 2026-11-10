@@ -61,6 +61,16 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         action="store_true",
         help="Enable DEBUG level logging (very noisy OCR console output).",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Collect per-image diagnostics into <output>.debug.md/.json "
+            "(dependency promotion-gate digest, review routing counts, "
+            "duration sub-crop outreach). Main report gains the derived "
+            "CPM-vs-ground-truth comparison either way."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -101,6 +111,7 @@ def main(argv: List[str] | None = None) -> int:
         limit=args.limit,
         ground_truth_dir=args.ground_truth,
         progress_callback=_progress_callback,
+        debug=args.debug,
     )
     if incremental_path.exists():
         incremental_path.unlink()
